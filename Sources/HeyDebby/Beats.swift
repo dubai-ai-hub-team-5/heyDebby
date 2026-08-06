@@ -61,17 +61,28 @@ struct BeatSplitter {
             more = rest.lowercased().contains("yes")
             return []
         }
-        // Prose. A newline ends a sentence even without punctuation.
-        prose += l + " "
+        // Prose. A newline ends a sentence even without punctuation. `**` is stripped
+        // here rather than in normalize() because only prose is safe to rewrite.
+        prose += l.replacingOccurrences(of: "**", with: "") + " "
         return releaseSentences()
     }
 
     /// Strips what models decorate lines with. A fence line carries no content at all.
+    ///
+    /// Bold is only removed around the marker keyword — everything past the colon is a
+    /// JSON payload, and stripping `**` there silently rewrites any label that contains
+    /// asterisks.
     private static func normalize(_ s: String) -> String {
         if s.hasPrefix("```") { return "" }
-        var t = s.replacingOccurrences(of: "**", with: "")
+        var t = s
         for junk in ["- ", "* "] where t.hasPrefix(junk) {
             t = String(t.dropFirst(junk.count))
+        }
+        if let colon = t.firstIndex(of: ":") {
+            let head = t[...colon].replacingOccurrences(of: "**", with: "")
+            var tail = String(t[t.index(after: colon)...])
+            if tail.hasPrefix("**") { tail = String(tail.dropFirst(2)) }
+            t = head + tail
         }
         return t.trimmingCharacters(in: .whitespaces)
     }

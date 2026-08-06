@@ -76,6 +76,17 @@ func runSelfCheck() {
            "a bulleted marker must not leak a bullet into speech: \(bullet)")
     if case .draw = bullet[1] {} else { assert(false, "a bulleted DRAW must still parse: \(bullet)") }
 
+    // A payload is data, not prose: asterisks inside a label must survive verbatim.
+    let starLabel = splitWhole("Note.\nDRAW: {\"tool\":\"text\",\"points\":[{\"x\":0.1,\"y\":0.1}],\"label\":\"very **important** note\"}\nEnd.")
+    if case .draw(let sl) = starLabel[1] {
+        assert(sl.label == "very **important** note",
+               "a label containing ** must not be rewritten: \(sl.label ?? "nil")")
+    } else { assert(false, "starred-label DRAW was lost: \(starLabel)") }
+
+    // Prose is spoken, so bold there is noise and must go.
+    assert(splitWhole("This is **really** important.") == [.say("This is really important.")],
+           "bold must be stripped from spoken prose: \(splitWhole("This is **really** important."))")
+
     let r1 = parseReply("Click the File menu.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"label\":\"File\"}]")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
     assert(r1.annotations.count == 1 && r1.annotations[0].label == "File" && abs(r1.annotations[0].x - 0.1) < 0.0001, "annotation parse wrong")
