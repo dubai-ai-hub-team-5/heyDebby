@@ -115,13 +115,20 @@ struct BeatSplitter {
         return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
     }
 
-    /// AppleScript's routes to running arbitrary code. This is a denylist, which is only
-    /// sound because of one property: a keyword must appear literally in the source to
-    /// execute. A payload cannot assemble `do shell script` from concatenated strings
-    /// without first calling an eval primitive — and every eval primitive is on this list.
+    /// AppleScript's routes to running arbitrary code. This is a denylist, and it is
+    /// honest about being one.
     ///
-    /// Whitespace is normalised first because AppleScript is whitespace-insensitive
-    /// between tokens: `do  shell   script` runs exactly like `do shell script`.
+    /// It holds for AppleScript's eval primitives: a keyword must appear literally in the
+    /// source to execute, so `do shell script` cannot be assembled from concatenated
+    /// strings without first calling `run script` or `load script` — and those are on the
+    /// list. Whitespace is normalised because AppleScript is whitespace-insensitive
+    /// between tokens.
+    ///
+    /// It does NOT hold for GUI scripting. `tell application "System Events" to keystroke`
+    /// is deliberately allowed — it is how non-scriptable apps are reached — and keystrokes
+    /// can open Spotlight and type into a terminal without naming one. This rail blocks
+    /// direct shell-out and eval. It is not a boundary against a model that has been
+    /// induced by on-screen content to type a command.
     private static func shellsOut(_ s: String) -> Bool {
         let flat = s.uppercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         let banned = ["DO SHELL SCRIPT",   // the shell, directly
@@ -129,8 +136,9 @@ struct BeatSplitter {
                       "RUN SCRIPT",        // evaluates AppleScript text at runtime
                       "LOAD SCRIPT"]       // loads a script object, then `run` executes it
         if banned.contains(where: { flat.contains($0) }) { return true }
-        // Telling a terminal emulator anything is shell access by another name.
-        let shells = ["\"TERMINAL\"", "\"ITERM\"", "\"ITERM2\"", "\"SCRIPT EDITOR\""]
+        // Terminal emulators by any of their spellings: bare name, "Terminal.app",
+        // or `tell application id "com.apple.Terminal"`.
+        let shells = ["TERMINAL", "ITERM", "SCRIPT EDITOR"]
         return shells.contains { flat.contains($0) }
     }
 

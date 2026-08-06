@@ -135,6 +135,18 @@ func runSelfCheck() {
            == [.run("tell application \"System Events\" to keystroke \"n\" using command down")],
            "System Events must still work — it is how non-scriptable apps are reached")
 
+    // Known and accepted: GUI scripting is allowed, so RUN: is not a boundary against a
+    // determined injection. This asserts the limit deliberately — if it ever starts
+    // failing, someone tightened the rail and the settings copy needs to change with it.
+    assert(splitWhole("RUN: tell application \"System Events\" to keystroke \"t\" using command down")
+           .count == 1, "keystroke injection is knowingly allowed; see shellsOut's comment")
+
+    // The bypasses that are NOT accepted.
+    assert(splitWhole("RUN: tell application id \"com.apple.Terminal\" to activate") == [],
+           "a terminal named by bundle id must still be refused")
+    assert(splitWhole("RUN: tell application \"Terminal.app\" to activate") == [],
+           "a terminal named with a .app suffix must still be refused")
+
     let r1 = parseReply("Click the File menu.\nPOINT: {\"x\":0.1,\"y\":0.2,\"label\":\"File\"}")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
     assert(r1.annotations.count == 1 && r1.annotations[0].label == "File"
