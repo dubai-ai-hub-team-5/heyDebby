@@ -47,6 +47,10 @@ struct BeatSplitter {
             var out = flushProse()   // the sentence before a marker is finished by it
             if let s = try? JSONDecoder().decode(ShapeSpec.self, from: Data(json.utf8)) {
                 out.append(.draw(s))
+            } else {
+                // Silent otherwise: PARSED drawings=N only counts survivors, so a line that
+                // never decoded at all would be indistinguishable from "drew nothing".
+                DebbyLog.write("BEAT DRAW: did not decode: \(json.prefix(120))")
             }
             return out
         }
@@ -54,6 +58,8 @@ struct BeatSplitter {
             var out = flushProse()
             if let a = try? JSONDecoder().decode(Annotation.self, from: Data(json.utf8)) {
                 out.append(.point(a))
+            } else {
+                DebbyLog.write("BEAT POINT: did not decode: \(json.prefix(120))")
             }
             return out
         }
@@ -61,8 +67,10 @@ struct BeatSplitter {
             more = rest.lowercased().contains("yes")
             return []
         }
-        // Prose. A newline ends a sentence even without punctuation. `**` is stripped
-        // here rather than in normalize() because only prose is safe to rewrite.
+        // Prose. A newline does NOT end a sentence: the line is appended with a trailing
+        // space, and unterminated lines keep accumulating in `prose` until real punctuation
+        // ends a sentence (releaseSentences() below) or finish() flushes what's left. `**`
+        // is stripped here rather than in normalize() because only prose is safe to rewrite.
         prose += l.replacingOccurrences(of: "**", with: "") + " "
         return releaseSentences()
     }

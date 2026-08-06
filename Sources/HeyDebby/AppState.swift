@@ -180,6 +180,8 @@ final class AppState: ObservableObject {
         fadeTask?.cancel()
         if isListening { _ = speech.stop(); isListening = false; partial = "" }
         voice.stop()
+        lessonPlayer?.cancel()
+        lessonPlayer = nil
         disarmClickWatch()
         overlay.hide()
         RegionSelector.close()
@@ -210,6 +212,8 @@ final class AppState: ObservableObject {
         isThinking = false
         overlay.hide()
         voice.stop()
+        lessonPlayer?.cancel()
+        lessonPlayer = nil
     }
 
     func toggleDrawing() {
@@ -480,6 +484,12 @@ final class AppState: ObservableObject {
         // waiting for a speech callback that will never come.
         let speechOn = voiceReplies
         let player = LessonPlayer(speechEnabled: speechOn)
+        // The whole-reply path only installs its player behind this same check; without it,
+        // turn A's capture can return (and get this far) after turn B already installed B's
+        // player — A would overwrite it, leaving B silent and undrawn. `talk`'s catch guards
+        // on `gen == chatGeneration` first, so this throw is a silent no-op for a normal
+        // supersede, never a user-visible error.
+        guard gen == chatGeneration else { throw CancellationError() }
         lessonPlayer = player
         var sp = BeatSplitter()
         // `more` reads the splitter from onIdle, which cannot fire before closeStream()

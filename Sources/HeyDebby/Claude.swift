@@ -111,6 +111,7 @@ enum Claude {
 
     To point at a spot or mark a whole area, put a line of its own:
     POINT: {"x":0.42,"y":0.18,"label":"File menu"}
+    POINT: {"x":0.1,"y":0.2,"w":0.3,"h":0.15,"label":"Toolbar"}
     An entry with only x,y points at a single spot. An entry with w,h marks a whole area whose \
     top-left corner is (x,y). All values are fractions of the screenshot's width/height, top-left origin. \
     Use an area for regions; use a point when the user should click. Omit when nothing to mark.

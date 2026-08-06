@@ -145,6 +145,10 @@ func runSelfCheck() {
     // onIdle drives auto-advance: a second fire burns a lesson step and an API call.
     lp.speechFinished()          // extra callback after the lesson already ended
     lp.speechFinished()
+    // speechFinished() alone never reaches pump() once idle (guard speaking blocks it) —
+    // closeStream() is a second route into pump() that doesn't go through that guard, so
+    // this is what actually exercises the idleFired latch.
+    lp.closeStream()
     assert(idleCount == 1, "onIdle must fire exactly once, got \(idleCount)")
 
     // A cancel that arrives while nothing is speaking belongs to someone else.
