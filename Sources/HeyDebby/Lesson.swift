@@ -66,10 +66,10 @@ final class LessonPlayer {
             case .say(let t):
                 if speechEnabled { speaking = true }
                 onSay?(t)
-            case .run:
+            case .run(let script):
                 // ponytail: not wired to osascript yet — a later task adds an onRun
                 // callback here. Dropping it keeps the queue draining in the meantime.
-                break
+                DebbyLog.write("LESSON RUN: dropped, execution not wired yet: \(script.prefix(120))")
             }
         }
         if !speaking, queue.isEmpty, !streamOpen, !idleFired {

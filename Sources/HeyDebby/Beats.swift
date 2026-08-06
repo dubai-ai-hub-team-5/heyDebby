@@ -115,12 +115,23 @@ struct BeatSplitter {
         return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
     }
 
-    /// `do shell script` / `do script` are AppleScript's routes to arbitrary shell.
-    /// A denylist is weak in general; here it closes the two documented escapes, and the
-    /// rest of the surface is bounded by osascript itself.
+    /// AppleScript's routes to running arbitrary code. This is a denylist, which is only
+    /// sound because of one property: a keyword must appear literally in the source to
+    /// execute. A payload cannot assemble `do shell script` from concatenated strings
+    /// without first calling an eval primitive — and every eval primitive is on this list.
+    ///
+    /// Whitespace is normalised first because AppleScript is whitespace-insensitive
+    /// between tokens: `do  shell   script` runs exactly like `do shell script`.
     private static func shellsOut(_ s: String) -> Bool {
-        let u = s.uppercased()
-        return u.contains("DO SHELL SCRIPT") || u.contains("DO SCRIPT")
+        let flat = s.uppercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let banned = ["DO SHELL SCRIPT",   // the shell, directly
+                      "DO SCRIPT",         // Terminal / Script Editor run a command
+                      "RUN SCRIPT",        // evaluates AppleScript text at runtime
+                      "LOAD SCRIPT"]       // loads a script object, then `run` executes it
+        if banned.contains(where: { flat.contains($0) }) { return true }
+        // Telling a terminal emulator anything is shell access by another name.
+        let shells = ["\"TERMINAL\"", "\"ITERM\"", "\"ITERM2\"", "\"SCRIPT EDITOR\""]
+        return shells.contains { flat.contains($0) }
     }
 
     /// Emits every complete sentence in `prose`. A sentence ends at `.`, `!` or `?`

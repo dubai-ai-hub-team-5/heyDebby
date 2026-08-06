@@ -113,6 +113,28 @@ func runSelfCheck() {
     assert(order.count == 5 && order[1] == .run("beep") && order[3] == .run("beep 2"),
            "RUN beats must keep their position in the narration: \(order)")
 
+    // AppleScript ignores whitespace between tokens; the check must too.
+    assert(splitWhole("RUN: do  shell   script \"id\"") == [],
+           "extra spaces must not slip past the rail")
+    assert(splitWhole("RUN: do\tshell\tscript \"id\"") == [],
+           "tabs must not slip past the rail")
+    // The eval primitives, which can build the other forbidden phrases at runtime.
+    assert(splitWhole("RUN: run script (\"do sh\" & \"ell script \\\"id\\\"\")") == [],
+           "run script is eval — it defeats any lexical check downstream of it")
+    assert(splitWhole("RUN: load script file \"/tmp/x.scpt\"") == [],
+           "load script + run is the same hole in two steps")
+    // Telling a terminal is shell access wearing a hat.
+    assert(splitWhole("RUN: tell application \"Terminal\" to activate") == [],
+           "no talking to terminal emulators")
+    // The things we actually want must still work.
+    assert(splitWhole("RUN: set volume output volume 60")
+           == [.run("set volume output volume 60")], "volume must still work")
+    assert(splitWhole("RUN: tell application \"Spotify\" to playpause")
+           == [.run("tell application \"Spotify\" to playpause")], "Spotify must still work")
+    assert(splitWhole("RUN: tell application \"System Events\" to keystroke \"n\" using command down")
+           == [.run("tell application \"System Events\" to keystroke \"n\" using command down")],
+           "System Events must still work — it is how non-scriptable apps are reached")
+
     let r1 = parseReply("Click the File menu.\nPOINT: {\"x\":0.1,\"y\":0.2,\"label\":\"File\"}")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
     assert(r1.annotations.count == 1 && r1.annotations[0].label == "File"
