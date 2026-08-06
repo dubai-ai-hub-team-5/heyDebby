@@ -5,6 +5,7 @@ enum Beat: Equatable {
     case say(String)
     case draw(ShapeSpec)
     case point(Annotation)
+    case run(String)     // one AppleScript statement, run as osascript arguments
 }
 
 /// Splits a model reply — streamed in fragments or handed over whole — into ordered beats.
@@ -63,6 +64,20 @@ struct BeatSplitter {
             }
             return out
         }
+        if let script = Self.payload(l, "RUN:") {
+            var out = flushProse()
+            if script.isEmpty {
+                DebbyLog.write("BEAT RUN: empty payload")
+            } else if Self.shellsOut(script) {
+                // AppleScript's escape hatch to the shell. The payload is model-written and
+                // the model reads the user's screen, so this is a prompt-injection path, not
+                // a hypothetical. Refuse it here, before Control ever sees it.
+                DebbyLog.write("BEAT RUN: refused, shells out: \(script.prefix(120))")
+            } else {
+                out.append(.run(script))
+            }
+            return out
+        }
         if let rest = Self.payload(l, "MORE:") {
             more = rest.lowercased().contains("yes")
             return []
@@ -98,6 +113,14 @@ struct BeatSplitter {
     private static func payload(_ line: String, _ marker: String) -> String? {
         guard line.uppercased().hasPrefix(marker) else { return nil }
         return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// `do shell script` / `do script` are AppleScript's routes to arbitrary shell.
+    /// A denylist is weak in general; here it closes the two documented escapes, and the
+    /// rest of the surface is bounded by osascript itself.
+    private static func shellsOut(_ s: String) -> Bool {
+        let u = s.uppercased()
+        return u.contains("DO SHELL SCRIPT") || u.contains("DO SCRIPT")
     }
 
     /// Emits every complete sentence in `prose`. A sentence ends at `.`, `!` or `?`

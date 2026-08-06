@@ -87,6 +87,32 @@ func runSelfCheck() {
     assert(splitWhole("This is **really** important.") == [.say("This is really important.")],
            "bold must be stripped from spoken prose: \(splitWhole("This is **really** important."))")
 
+    // --- RUN: app control ---
+    let vol = splitWhole("Turning it up.\nRUN: set volume output volume 60\nDone.")
+    assert(vol.count == 3, "RUN must be its own beat: \(vol)")
+    assert(vol[0] == .say("Turning it up.") && vol[2] == .say("Done."),
+           "a RUN line must not be spoken: \(vol)")
+    assert(vol[1] == .run("set volume output volume 60"), "RUN payload wrong: \(vol[1])")
+
+    // The payload is handed to osascript verbatim — quoting and punctuation must survive.
+    let track = splitWhole("RUN: tell application \"Spotify\" to play track \"spotify:track:1\"")
+    assert(track == [.run("tell application \"Spotify\" to play track \"spotify:track:1\"")],
+           "quotes and colons inside a RUN payload must survive: \(track)")
+
+    // AppleScript can shell out. The payload is model-written and the model reads the
+    // user's screen, so a page saying this is a live injection path — drop it at the parser.
+    assert(splitWhole("RUN: do shell script \"rm -rf ~\"") == [],
+           "do shell script must never become a beat")
+    assert(splitWhole("RUN: DO SHELL SCRIPT \"rm -rf ~\"") == [],
+           "the shell-out check is case-insensitive")
+    assert(splitWhole("RUN: tell app \"Terminal\" to do script \"rm -rf ~\"") == [],
+           "do script opens a Terminal window running a command — same hole")
+
+    // Ordering: a RUN between two sentences plays between them, not at the end.
+    let order = splitWhole("First.\nRUN: beep\nSecond.\nRUN: beep 2\nThird.")
+    assert(order.count == 5 && order[1] == .run("beep") && order[3] == .run("beep 2"),
+           "RUN beats must keep their position in the narration: \(order)")
+
     let r1 = parseReply("Click the File menu.\nPOINT: {\"x\":0.1,\"y\":0.2,\"label\":\"File\"}")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
     assert(r1.annotations.count == 1 && r1.annotations[0].label == "File"
