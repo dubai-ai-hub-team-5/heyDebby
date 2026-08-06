@@ -855,7 +855,8 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(width: 260, alignment: .leading)
             Text("Once you allow an app, Debby can control it fully, not just the one thing "
-                 + "you asked for. Worth leaving off unless you want that.")
+                 + "you asked for. She also decides what to run from what's on your screen, "
+                 + "so a web page or email can influence it. Leave this off unless you want that.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(width: 260, alignment: .leading)
             Spacer(minLength: 0)

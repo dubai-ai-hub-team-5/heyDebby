@@ -587,11 +587,14 @@ final class AppState: ObservableObject {
         player.onRun = { [weak self] script in
             guard let self, self.chatGeneration == gen, self.appControl else { return }
             Control.run([script]) { [weak self] code, out in
-                guard code != 0 else { return }
+                // osascript can take seconds; a new chat may already have started by the
+                // time it returns. Recheck, same as onIdle does after its own async gap —
+                // a stale error must not land on top of a conversation it isn't about.
+                guard let self, self.chatGeneration == gen, code != 0 else { return }
                 // Automation denial and "app isn't running" both land here, and both are
                 // things only the user can fix — so say them rather than only logging.
                 let msg = out.trimmingCharacters(in: .whitespacesAndNewlines)
-                self?.show("⚠️ \(msg.isEmpty ? "that didn't work" : String(msg.prefix(160)))")
+                self.show("⚠️ \(msg.isEmpty ? "that didn't work" : String(msg.prefix(160)))")
             }
         }
         // The lesson advances when the narration actually ends, not on a timer.
