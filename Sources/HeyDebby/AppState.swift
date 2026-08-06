@@ -72,6 +72,7 @@ final class AppState: ObservableObject {
     private var fadeTask: Task<Void, Never>?
     private var activeScreen: NSScreen?
     private var runningAgents: [Process] = []
+    private var lessonPlayer: LessonPlayer?
 
     init() {
         overlay.onHide = { [weak self] in
@@ -92,6 +93,7 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 self?.isSpeaking = false
                 self?.speakingText = ""
+                self?.lessonPlayer?.speechFinished()
             }
         }
         drawingController.onStop = { [weak self] in
@@ -325,6 +327,8 @@ final class AppState: ObservableObject {
     func submit(_ text: String, auto: Bool = false) {
         if isListening { _ = speech.stop(); isListening = false; partial = "" }
         voice.stop()
+        lessonPlayer?.cancel()
+        lessonPlayer = nil
         disarmClickWatch()
         pendingAdvance?.cancel()  // manual send supersedes a queued auto-advance
         showNext = false
@@ -388,97 +392,13 @@ final class AppState: ObservableObject {
                 history.append((role: "assistant", text: reply))
                 if history.count > 20 { history.removeFirst(history.count - 20) }
                 show(clean)
-                let mapped = anns.map { mapToScreen($0, container: snapContainer) }
-                if !mapped.isEmpty {
-                    let f = screen.frame
-                    pointer.highlight(mapped.map {
-                        let cx = $0.x + ($0.w ?? 0) / 2
-                        let cy = $0.y + ($0.h ?? 0) / 2
-                        return CGPoint(x: f.minX + cx * f.width, y: f.minY + (1 - cy) * f.height)
-                    })
-                    showNext = true
-                    armClickWatch()
-                }
-                if voiceReplies {
-                    // Start speaking first so our delay timers are aligned with speech start.
-                    voice.speak(clean)
-                    if !mapped.isEmpty {
-                        // Open the overlay window empty; add each annotation as the speech
-                        // reaches the approximate character position where its label is mentioned.
-                        overlay.showEmpty(on: screen)
-                        let nsText = clean as NSString
-                        // Empirical: AVSpeechSynthesizer at rate 0.52 ≈ 33 chars/sec.
-                        for (i, (ann, orig)) in zip(mapped, anns).enumerated() {
-                            let pos = nsText.range(of: orig.label, options: .caseInsensitive).location
-                            let delay = pos == NSNotFound
-                                ? Double(i) * 2.0
-                                : max(0, Double(pos) / 33.0 - 0.2)
-                            let capturedAnn = ann
-                            Task { [weak self] in
-                                if delay > 0 {
-                                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                                }
-                                guard let self, self.chatGeneration == gen else { return }
-                                self.overlay.addAnnotation(capturedAnn)
-                            }
-                        }
-                    }
-                } else if !mapped.isEmpty {
-                    overlay.show(mapped, on: screen)
-                }
-
-                // AI-driven canvas drawings: convert ShapeSpec → DrawnShape and
-                // reveal each shape with a small delay so it looks like live drawing.
-                if !drawings.isEmpty {
-                    let drawnShapes: [DrawnShape] = drawings.compactMap { spec -> DrawnShape? in
-                        guard let tool = DrawTool(rawValue: spec.tool) else { return nil }
-                        // A text label is one point; everything else needs a start and an end.
-                        guard spec.points.count >= (tool == .text ? 1 : 2) else { return nil }
-                        let pts = spec.points.map { pt -> CGPoint in
-                            let mapped = mapToScreen(Annotation(x: pt.x, y: pt.y, label: ""), container: snapContainer)
-                            return CGPoint(x: mapped.x * screen.frame.width, y: mapped.y * screen.frame.height)
-                        }
-                        return DrawnShape(tool: tool, points: pts,
-                                          color: colorFrom(spec.color ?? "orange"),
-                                          lineWidth: CGFloat(spec.lineWidth ?? 3),
-                                          label: spec.label ?? "")
-                    }
-                    DebbyLog.write("DRAW \(drawnShapes.count)/\(drawings.count) shapes accepted")
-                    if !drawnShapes.isEmpty {
-                        isDrawing = true
-                        // Non-interactive: the AI illustrating something must not take over the
-                        // cursor and hand the user a drawing toolbar.
-                        if !drawingController.isActive {
-                            drawingController.start(on: screen, interactive: false)
-                        }
-                        for (i, shape) in drawnShapes.enumerated() {
-                            let delay = Double(i) * 0.5
-                            let s = shape
-                            Task { [weak self] in
-                                if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
-                                guard let self, self.chatGeneration == gen else { return }
-                                self.drawingController.shapes.append(s)
-                            }
-                        }
-                    }
-                }
-
-                // Multi-step lesson: draw the next step by itself. Waiting for the reply to
-                // finish being spoken keeps the steps in time with the narration instead of
-                // stacking three shapes on the screen at once.
-                if parsed.more && autoSteps < maxAutoSteps {
-                    autoSteps += 1
-                    let spoken = voiceReplies ? Double(clean.count) / 33.0 : 0  // same 33 chars/sec as above
-                    pendingAdvance = Task { [weak self] in
-                        do {
-                            try await Task.sleep(nanoseconds: UInt64((spoken + 1.2) * 1_000_000_000))
-                        } catch { return }
-                        guard let self, self.chatGeneration == gen, !self.isListening else { return }
-                        self.submit("continue", auto: true)
-                    }
-                } else if parsed.more {
-                    DebbyLog.write("AUTO-STEP cap (\(maxAutoSteps)) hit — stopping the lesson")
-                }
+                let player = LessonPlayer(speechEnabled: voiceReplies)
+                lessonPlayer = player
+                if !parsed.annotations.isEmpty { overlay.showEmpty(on: screen) }
+                attach(player, gen: gen, container: snapContainer, screen: screen,
+                       more: { parsed.more })
+                player.append(parsed.beats)
+                player.closeStream()
             } catch {
                 guard gen == chatGeneration else { return }
                 isThinking = false
@@ -486,6 +406,70 @@ final class AppState: ObservableObject {
                 show("⚠️ \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Wires a player to the screen and the voice. `more` is a closure rather than a Bool
+    /// because a streamed reply only knows whether the lesson continues once the stream
+    /// has closed — which is before `onIdle` fires, but after this is called.
+    private func attach(_ player: LessonPlayer, gen: Int, container: CGRect?,
+                        screen: NSScreen, more: @escaping () -> Bool) {
+        player.onSay = { [weak self] sentence in
+            guard let self, self.chatGeneration == gen else { return }
+            if self.voiceReplies { self.voice.speak(sentence) }
+        }
+        player.onPoint = { [weak self] ann in
+            guard let self, self.chatGeneration == gen else { return }
+            let m = mapToScreen(ann, container: container)
+            let f = screen.frame
+            let cx = m.x + (m.w ?? 0) / 2, cy = m.y + (m.h ?? 0) / 2
+            self.pointer.highlight([CGPoint(x: f.minX + cx * f.width,
+                                            y: f.minY + (1 - cy) * f.height)])
+            self.overlay.addAnnotation(m)
+            self.showNext = true
+            self.armClickWatch()
+        }
+        player.onDraw = { [weak self] spec in
+            guard let self, self.chatGeneration == gen,
+                  let shape = self.drawnShape(from: spec, container: container,
+                                              screen: screen) else { return }
+            self.isDrawing = true
+            // Non-interactive: the AI illustrating something must not take over the
+            // cursor and hand the user a drawing toolbar.
+            if !self.drawingController.isActive {
+                self.drawingController.start(on: screen, interactive: false)
+            }
+            self.drawingController.shapes.append(shape)
+        }
+        // The lesson advances when the narration actually ends, not on a timer.
+        player.onIdle = { [weak self] in
+            guard let self, self.chatGeneration == gen, more() else { return }
+            guard self.autoSteps < self.maxAutoSteps else {
+                DebbyLog.write("AUTO-STEP cap (\(self.maxAutoSteps)) hit — stopping the lesson")
+                return
+            }
+            self.autoSteps += 1
+            self.pendingAdvance = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
+                guard let self, self.chatGeneration == gen, !self.isListening else { return }
+                self.submit("continue", auto: true)
+            }
+        }
+    }
+
+    /// Normalized ShapeSpec → on-screen DrawnShape. A text label is one point;
+    /// everything else needs a start and an end.
+    private func drawnShape(from spec: ShapeSpec, container: CGRect?,
+                            screen: NSScreen) -> DrawnShape? {
+        guard let tool = DrawTool(rawValue: spec.tool) else { return nil }
+        guard spec.points.count >= (tool == .text ? 1 : 2) else { return nil }
+        let pts = spec.points.map { pt -> CGPoint in
+            let mapped = mapToScreen(Annotation(x: pt.x, y: pt.y, label: ""), container: container)
+            return CGPoint(x: mapped.x * screen.frame.width, y: mapped.y * screen.frame.height)
+        }
+        return DrawnShape(tool: tool, points: pts,
+                          color: colorFrom(spec.color ?? "orange"),
+                          lineWidth: CGFloat(spec.lineWidth ?? 3),
+                          label: spec.label ?? "")
     }
 
     private func runAgent(_ task: String) {
