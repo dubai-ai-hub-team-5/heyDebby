@@ -11,42 +11,20 @@ enum Beat: Equatable {
 ///
 /// One marker per line, unlike the `DRAWINGS: [ … ]` block this replaces. A line is the
 /// smallest thing a stream lets you be sure is complete; a JSON array is only complete at
-/// its closing bracket, which arrives after every shape it contains.
+/// its closing bracket, which arrives after every shape it contains. Prose is released at
+/// the newline, once `normalize()` has had a chance to strip decoration — the system prompt
+/// puts each `DRAW:`/`POINT:`/`MORE:` on its own line right after the sentence describing it,
+/// so in this format a line already is a sentence; there is no gain in releasing mid-line.
 struct BeatSplitter {
     private(set) var more = false
 
-    private var line = ""    // characters since the last newline, still possibly a marker
+    private var line = ""    // characters since the last newline
     private var prose = ""   // prose accumulating toward a sentence end
-
-    private static let markers = ["DRAW:", "POINT:", "MORE:"]
-
-    /// True while the buffer is still growing toward a marker, or has already become
-    /// one. Both halves are needed: the first holds "DRA" until it can be ruled out,
-    /// the second keeps holding once "DRAW:" is complete and its JSON is arriving —
-    /// without it the space after the colon ends the prefix match and the whole
-    /// marker line gets spoken as prose.
-    ///
-    /// Once neither holds, the characters are prose and can be released without
-    /// waiting for the newline — which is what lets speech start on the first
-    /// sentence rather than the first line.
-    private static func couldBeMarker(_ s: String) -> Bool {
-        let u = s.uppercased()
-        return markers.contains { $0.hasPrefix(u) || u.hasPrefix($0) }
-    }
 
     mutating func feed(_ chunk: String) -> [Beat] {
         var out: [Beat] = []
         for ch in chunk {
-            if ch == "\n" {
-                out += flushLine()
-            } else {
-                line.append(ch)
-                if !Self.couldBeMarker(line) {
-                    prose += line
-                    line = ""
-                    out += releaseSentences()
-                }
-            }
+            if ch == "\n" { out += flushLine() } else { line.append(ch) }
         }
         return out
     }
@@ -91,11 +69,10 @@ struct BeatSplitter {
     /// Strips what models decorate lines with. A fence line carries no content at all.
     private static func normalize(_ s: String) -> String {
         if s.hasPrefix("```") { return "" }
-        var t = s
-        for junk in ["**", "- ", "* "] where t.hasPrefix(junk) {
+        var t = s.replacingOccurrences(of: "**", with: "")
+        for junk in ["- ", "* "] where t.hasPrefix(junk) {
             t = String(t.dropFirst(junk.count))
         }
-        if t.hasSuffix("**") { t = String(t.dropLast(2)) }
         return t.trimmingCharacters(in: .whitespaces)
     }
 

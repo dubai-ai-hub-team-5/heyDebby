@@ -56,9 +56,25 @@ func runSelfCheck() {
     let bad = splitWhole("First.\nDRAW: {not json}\nSecond.")
     assert(bad == [.say("First."), .say("Second.")], "a bad DRAW line must be dropped alone: \(bad)")
 
-    // Models wrap things in fences and bullets; those lines carry no content.
-    let fenced = splitWhole("Look.\n```json\nDRAW: {\"tool\":\"circle\",\"points\":[{\"x\":0.1,\"y\":0.1},{\"x\":0.2,\"y\":0.2}]}\n```\nDone.")
+    let circle = "{\"tool\":\"circle\",\"points\":[{\"x\":0.1,\"y\":0.1},{\"x\":0.2,\"y\":0.2}]}"
+    // Decoration must be stripped, not spoken — asserting the count alone hid a bug where
+    // the fence characters were welded onto the sentences either side.
+    let fenced = splitWhole("Look.\n```json\nDRAW: \(circle)\n```\nDone.")
     assert(fenced.count == 3, "fences must be ignored, not spoken: \(fenced)")
+    assert(fenced[0] == .say("Look.") && fenced[2] == .say("Done."),
+           "fence characters must not leak into speech: \(fenced)")
+    if case .draw(let c) = fenced[1] { assert(c.tool == "circle", "fenced DRAW wrong: \(c)") }
+    else { assert(false, "fenced DRAW was lost: \(fenced)") }
+
+    let bold = splitWhole("Look.\n**DRAW:** \(circle)\nDone.")
+    assert(bold.count == 3 && bold[0] == .say("Look.") && bold[2] == .say("Done."),
+           "a bolded marker must not leak into speech: \(bold)")
+    if case .draw = bold[1] {} else { assert(false, "a bolded DRAW must still parse: \(bold)") }
+
+    let bullet = splitWhole("Look.\n- DRAW: \(circle)\nDone.")
+    assert(bullet.count == 3 && bullet[0] == .say("Look.") && bullet[2] == .say("Done."),
+           "a bulleted marker must not leak a bullet into speech: \(bullet)")
+    if case .draw = bullet[1] {} else { assert(false, "a bulleted DRAW must still parse: \(bullet)") }
 
     let r1 = parseReply("Click the File menu.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"label\":\"File\"}]")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
