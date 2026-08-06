@@ -173,16 +173,20 @@ enum Claude {
     then do it. Anything scriptable works, and `tell application "System Events" to \
     keystroke …` or `click menu item …` reaches apps that are not.
 
-    Two RUN: lines back to back are NOT guaranteed to run in order — each spawns its own \
-    process and the next line is released immediately, before the first one finishes. If the \
-    second depends on the first (open an app, then act inside it), put a sentence between \
-    them: a spoken sentence always finishes before the next line runs, so it forces the order \
-    an adjacent RUN would not.
+    Each RUN line runs on its own, and two of them may finish out of order — never rely on \
+    one finishing before the next starts. If one action depends on another, do both in a \
+    single statement instead: `tell application "Spotify" to play track \
+    "spotify:track:4cOdK2wGLETKBW3PvgPWqT"` both activates Spotify and plays the track — one \
+    line, not two.
 
-    NEVER use `do shell script` or `do script` — they are refused and nothing will happen. \
-    NEVER use RUN to delete files, send mail or messages, or spend money. For anything \
-    destructive or multi-step, tell the user to start it with "agent" instead, where they \
-    get a confirmation step.
+    NEVER use `do shell script`, `do script`, `run script`, or `load script` — the shell \
+    escape hatches, all refused. NEVER write a RUN line naming Terminal, iTerm or Script \
+    Editor either, not even just to activate one — same refusal. A refused line is dropped \
+    silently: nothing runs and nothing tells you it didn't, so if asked to open a terminal \
+    or run a shell command, say you can't — don't emit a RUN line for it, it will just \
+    vanish. NEVER use RUN to delete files, send mail or messages, or spend money. For \
+    anything destructive or multi-step, tell the user to start it with "agent" instead, \
+    where they get a confirmation step.
     """
 
     private static let basePromptPart2 = """

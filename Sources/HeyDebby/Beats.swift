@@ -115,6 +115,20 @@ struct BeatSplitter {
         return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
     }
 
+    /// Every form the parser refuses, in the casing the system prompt should quote them in.
+    /// Shared (not just an implementation detail of `shellsOut`) so a selfcheck can assert
+    /// the prompt documents every one of these — the two lists drifting apart silently is
+    /// exactly what would let a model narrate an action that got dropped on the floor.
+    static let refusedForms = [
+        "do shell script",   // the shell, directly
+        "do script",         // Terminal / Script Editor run a command
+        "run script",        // evaluates AppleScript text at runtime
+        "load script",       // loads a script object, then `run` executes it
+        // Terminal emulators by any of their spellings: bare name, "Terminal.app", or
+        // `tell application id "com.apple.Terminal"`.
+        "Terminal", "iTerm", "Script Editor",
+    ]
+
     /// AppleScript's routes to running arbitrary code. This is a denylist, and it is
     /// honest about being one.
     ///
@@ -131,15 +145,7 @@ struct BeatSplitter {
     /// induced by on-screen content to type a command.
     private static func shellsOut(_ s: String) -> Bool {
         let flat = s.uppercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        let banned = ["DO SHELL SCRIPT",   // the shell, directly
-                      "DO SCRIPT",         // Terminal / Script Editor run a command
-                      "RUN SCRIPT",        // evaluates AppleScript text at runtime
-                      "LOAD SCRIPT"]       // loads a script object, then `run` executes it
-        if banned.contains(where: { flat.contains($0) }) { return true }
-        // Terminal emulators by any of their spellings: bare name, "Terminal.app",
-        // or `tell application id "com.apple.Terminal"`.
-        let shells = ["TERMINAL", "ITERM", "SCRIPT EDITOR"]
-        return shells.contains { flat.contains($0) }
+        return refusedForms.contains { flat.contains($0.uppercased()) }
     }
 
     /// Emits every complete sentence in `prose`. A sentence ends at `.`, `!` or `?`

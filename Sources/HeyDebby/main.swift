@@ -352,10 +352,20 @@ func runSelfCheck() {
            "app control off must not mention the marker")
     assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("do shell script"),
            "the prompt must tell the model the shell escape is refused")
-    // Adjacent RUN: lines are not serialized (each spawns its own osascript process) —
-    // the model needs to know to separate dependent actions with a sentence.
-    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("Two RUN:"),
-           "the prompt must warn that adjacent RUN lines can race")
+    // Adjacent RUN: lines are not serialized (each spawns its own osascript process) even
+    // with voice replies off, when .say never blocks the queue either — so the prompt must
+    // not claim a sentence in between guarantees order, only that a single statement does.
+    let runOnPrompt = Claude.promptTemplate(aspect: 1.6, appControl: true)
+    assert(runOnPrompt.contains("finish out of order") && runOnPrompt.contains("single statement"),
+           "the prompt must warn RUN lines can race and point at one statement, not a sentence, as the fix")
+    assert(!runOnPrompt.contains("always finishes before the next line runs"),
+           "the ordering claim must not promise something LessonPlayer doesn't deliver when voiceReplies is off")
+    // The prompt's refusal list must name every form the parser actually refuses, or a model
+    // asked for a refused one emits a RUN line that is silently dropped and narrates success.
+    for term in BeatSplitter.refusedForms {
+        assert(runOnPrompt.localizedCaseInsensitiveContains(term),
+               "prompt must document refused form: \(term)")
+    }
     // "You cannot act on apps yourself" (the agent-routing paragraph) would directly
     // contradict the RUN: section once app control is on — it must not appear together
     // with RUN:, and RUN:'s absence must not lose the agent-routing guidance either.
