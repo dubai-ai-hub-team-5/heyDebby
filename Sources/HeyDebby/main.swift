@@ -279,6 +279,30 @@ func runSelfCheck() {
            "open notch must stay pinned to the top centre: \(open)")
     assert(open.contains(CGPoint(x: 500, y: 760)) && !shut.contains(CGPoint(x: 500, y: 760)),
            "opening must widen the hover target")
+
+    // --- OpenAI SSE frames ---
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hy\",\"sequence_number\":1}") == "Hy",
+        "output_text.delta must yield its text")
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.created\",\"sequence_number\":0}") == nil,
+        "non-text events carry no delta")
+    assert(OpenAI.delta(fromSSELine: "data: [DONE]") == nil, "the DONE sentinel is not text")
+    assert(OpenAI.delta(fromSSELine: "") == nil, "SSE keep-alive blank lines are not text")
+    assert(OpenAI.delta(fromSSELine: "event: response.output_text.delta") == nil,
+           "only data: lines carry payloads")
+    assert(OpenAI.defaultModel == "gpt-5.6-luna", "default model changed without a decision")
+    // SSE only strips one leading space after the colon if present — a server (or a
+    // future OpenAI SDK revision) is free to omit it. Codex.swift's parser for this same
+    // endpoint family already tolerates that; this one must not silently drop the delta.
+    assert(OpenAI.delta(fromSSELine:
+        "data:{\"type\":\"response.output_text.delta\",\"delta\":\"Hy\",\"sequence_number\":1}") == "Hy",
+        "a missing space after 'data:' must not swallow the delta")
+    // The [DONE] sentinel check must compare the whole line, not search inside it — a
+    // delta whose actual text happens to be "[DONE]" is still real text to speak.
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"[DONE]\",\"sequence_number\":2}") == "[DONE]",
+        "a delta whose text is literally [DONE] must still come through")
 }
 
 if CommandLine.arguments.contains("--selfcheck") {
