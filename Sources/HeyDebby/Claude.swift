@@ -75,12 +75,18 @@ func parseReply(_ text: String) -> ParsedReply {
 /// this number the model cannot make a square look square or a perpendicular be perpendicular.
 nonisolated(unsafe) var debbyScreenAspect: Double = 16.0 / 10.0
 
-enum Claude {
-    static var systemPrompt: String { promptTemplate(aspect: debbyScreenAspect) }
+/// Set from AppState before each request. The RUN: documentation is omitted when app
+/// control is off — a model told about a marker the app will drop narrates actions that
+/// never happen.
+nonisolated(unsafe) var debbyAppControl = false
 
-    static func promptTemplate(aspect: Double) -> String {
+enum Claude {
+    static var systemPrompt: String { promptTemplate(aspect: debbyScreenAspect, appControl: debbyAppControl) }
+
+    static func promptTemplate(aspect: Double, appControl: Bool = false) -> String {
         let a = String(format: "%.2f", aspect)
-        return basePrompt + """
+        return basePromptPart1 + (appControl ? runPrompt : "") + basePromptPart2
+            + (appControl ? agentPromptRunOn : agentPrompt) + """
 
 
         Geometry: the screen is \(a)× wider than it is tall, and x and y are fractions of their \
@@ -99,7 +105,7 @@ enum Claude {
         """
     }
 
-    private static let basePrompt = """
+    private static let basePromptPart1 = """
     You are Debby, a friendly AI buddy who lives on the user's Mac, right next to their cursor. \
     Each user message includes a fresh screenshot of their screen. Help with whatever they're looking at: \
     answer questions, explain UI, give guidance. Keep replies SHORT and conversational; they are spoken aloud.
@@ -153,6 +159,34 @@ enum Claude {
     each turn and never repeat a shape you already drew, or it will be drawn twice. Reuse the exact \
     coordinates from your earlier lines so new pieces meet the old ones — if the base ran to \
     {"x":0.2,"y":0.7}, the next leg starts at exactly {"x":0.2,"y":0.7}.
+    """
+
+    /// Assembled into the prompt only when app control is on (see `debbyAppControl`).
+    private static let runPrompt = """
+
+
+    You can control the user's Mac. To do something in an app, put a line of its own:
+    RUN: set volume output volume 60
+    RUN: tell application "Spotify" to play track "spotify:track:4cOdK2wGLETKBW3PvgPWqT"
+    One AppleScript statement per line, no ``` fences. It runs the moment you get to it, \
+    so put the line right after the sentence that announces it — say what you are doing, \
+    then do it. Anything scriptable works, and `tell application "System Events" to \
+    keystroke …` or `click menu item …` reaches apps that are not.
+
+    Two RUN: lines back to back are NOT guaranteed to run in order — each spawns its own \
+    process and the next line is released immediately, before the first one finishes. If the \
+    second depends on the first (open an app, then act inside it), put a sentence between \
+    them: a spoken sentence always finishes before the next line runs, so it forces the order \
+    an adjacent RUN would not.
+
+    NEVER use `do shell script` or `do script` — they are refused and nothing will happen. \
+    NEVER use RUN to delete files, send mail or messages, or spend money. For anything \
+    destructive or multi-step, tell the user to start it with "agent" instead, where they \
+    get a confirmation step.
+    """
+
+    private static let basePromptPart2 = """
+
 
     While a lesson still has steps left, end your reply with a line:
     MORE: yes
@@ -162,10 +196,28 @@ enum Claude {
 
     The screenshot may be cropped to a focus area the user selected — treat it as the whole context \
     and place all coordinates relative to THIS image.
+    """
+
+    /// The app-control-off wording ("you cannot act on apps yourself") would directly
+    /// contradict the RUN: section above it once app control is on, so this paragraph has
+    /// two variants rather than one fixed one — see `agentPromptRunOn`.
+    private static let agentPrompt = """
+
 
     You cannot act on apps yourself, but the user's background agents can (Gmail, Calendar, Notion, \
     Slack, GitHub and more, via Composio). When the user asks for something in their apps — check \
     email, schedule, send a message, update a doc — tell them to say or type "agent: <the task>".
+    """
+
+    /// Used instead of `agentPrompt` when app control is on: RUN already covers "you can act
+    /// on apps", so this draws the line between a quick RUN and a background agent instead
+    /// of repeating the now-false claim that apps are out of reach.
+    private static let agentPromptRunOn = """
+
+
+    RUN handles one scriptable action in one app. For anything bigger — a multi-step task, or \
+    an app that isn't scriptable but has a Composio integration (Gmail, Calendar, Notion, Slack, \
+    GitHub and more) — tell the user to say or type "agent: <the task>" instead.
     """
 
     /// Same trick the Codex backend uses for a ChatGPT plan: shell out to the CLI that

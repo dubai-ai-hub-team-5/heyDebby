@@ -387,6 +387,7 @@ final class AppState: ObservableObject {
         let screen = activeScreen ?? NSScreen.underMouse
         // The prompt quotes this so the model can make squares square and turns perpendicular.
         debbyScreenAspect = screen.frame.width / max(1, screen.frame.height)
+        debbyAppControl = appControl
         Task {
             do {
                 // An auto-advance step changes nothing on screen except our own drawing,

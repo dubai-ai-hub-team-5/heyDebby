@@ -327,9 +327,44 @@ func runSelfCheck() {
     // Without an allowlist `claude -p` denies every tool, so app tasks fail silently.
     // The prompt must come before --allowedTools, which is variadic and eats what follows.
     let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false)
-    assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep"), "claude agent needs tools: \(cl)")
+    assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep Bash(osascript:*)"),
+           "claude agent needs tools: \(cl)")
     assert(cl.range(of: "'email bob'")!.upperBound <= cl.range(of: "--allowedTools")!.lowerBound,
            "prompt must precede the variadic flag: \(cl)")
+
+    // Agents get scoped shell for AppleScript — not bare Bash.
+    let ag = agentCommand(backend: "claude", task: "play some music",
+                          screenshotPath: nil, fullAccess: false)
+    assert(ag.contains("Bash(osascript:*)"),
+           "the claude agent needs scoped osascript for app tasks: \(ag)")
+    assert(ag.range(of: "'play some music'")!.upperBound
+           <= ag.range(of: "--allowedTools")!.lowerBound,
+           "--allowedTools is variadic and must stay last")
+    // Full access already implies everything; the scoped entry would be noise.
+    assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false)
+            .contains("osascript"), "codex agents are unaffected")
+
+    // The marker is documented only when the feature is on. A model told about a marker
+    // the app will drop announces actions that never happen.
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("RUN:"),
+           "app control on must document the marker")
+    assert(!Claude.promptTemplate(aspect: 1.6, appControl: false).contains("RUN:"),
+           "app control off must not mention the marker")
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("do shell script"),
+           "the prompt must tell the model the shell escape is refused")
+    // Adjacent RUN: lines are not serialized (each spawns its own osascript process) —
+    // the model needs to know to separate dependent actions with a sentence.
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("Two RUN:"),
+           "the prompt must warn that adjacent RUN lines can race")
+    // "You cannot act on apps yourself" (the agent-routing paragraph) would directly
+    // contradict the RUN: section once app control is on — it must not appear together
+    // with RUN:, and RUN:'s absence must not lose the agent-routing guidance either.
+    assert(!Claude.promptTemplate(aspect: 1.6, appControl: true).contains("cannot act on apps"),
+           "app control on must not still claim apps are out of reach")
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("agent:"),
+           "app control on must still route multi-step work to an agent")
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: false).contains("cannot act on apps"),
+           "app control off keeps the original agent-only framing")
     let mid = mapToScreen(Annotation(x: 0.5, y: 0.5, label: "t"),
                           container: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5))
     assert(abs(mid.x - 0.5) < 1e-9 && abs(mid.y - 0.5) < 1e-9, "container center mapping wrong")

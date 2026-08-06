@@ -21,7 +21,9 @@ func agentCommand(backend: String, task: String, screenshotPath: String?, fullAc
     }
     // Without an allowlist `claude -p` denies every tool, so an app task fails silently.
     // --allowedTools is variadic: it must be last, and the prompt must precede it.
-    return "claude -p \(shellQuote(prompt)) --allowedTools mcp__composio Read Glob Grep"
+    // Bash(osascript:*) is scoped rather than bare Bash deliberately: an agent that can
+    // run AppleScript is a much smaller grant than one that can run anything.
+    return "claude -p \(shellQuote(prompt)) --allowedTools mcp__composio Read Glob Grep Bash(osascript:*)"
 }
 
 // Both CLIs have the Composio MCP gateway registered (connect.composio.dev) —
