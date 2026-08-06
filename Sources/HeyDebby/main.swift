@@ -120,6 +120,48 @@ func runSelfCheck() {
     assert(step.text == "Now side b.", "the MORE marker must not be spoken: \(step.text)")
     assert(!parseReply("All done — that's the theorem.").more, "no marker means the lesson ended")
 
+    // --- LessonPlayer: a shape waits for the sentence in front of it ---
+    let lp = LessonPlayer()
+    var played: [String] = []
+    lp.onSay = { played.append("say:\($0)") }
+    lp.onDraw = { played.append("draw:\($0.tool)") }
+    lp.onPoint = { played.append("point:\($0.label)") }
+    var idle = false
+    lp.onIdle = { idle = true }
+
+    let lineShape = ShapeSpec(tool: "line", points: [.init(x: 0, y: 0), .init(x: 1, y: 1)],
+                              color: nil, lineWidth: nil, label: nil)
+    lp.append([.say("one"), .draw(lineShape), .say("two")])
+    assert(played == ["say:one"],
+           "nothing may play while a sentence is still being spoken: \(played)")
+    lp.speechFinished()
+    assert(played == ["say:one", "draw:line", "say:two"],
+           "the shape must land between its two sentences: \(played)")
+    assert(!idle, "still speaking — not idle yet")
+    lp.speechFinished()
+    lp.closeStream()
+    assert(idle, "queue drained and stream closed means idle")
+
+    // Beats arriving after playback has started still queue behind the current sentence.
+    let lp2 = LessonPlayer()
+    var played2: [String] = []
+    lp2.onSay = { played2.append("say:\($0)") }
+    lp2.onDraw = { played2.append("draw:\($0.tool)") }
+    lp2.append([.say("first")])
+    lp2.append([.draw(lineShape)])
+    assert(played2 == ["say:first"], "a late-arriving shape must still wait: \(played2)")
+    lp2.speechFinished()
+    assert(played2 == ["say:first", "draw:line"], "…and play once the sentence ends: \(played2)")
+
+    // With speech off there is nothing to wait for.
+    let lp3 = LessonPlayer(speechEnabled: false)
+    var played3: [String] = []
+    lp3.onSay = { played3.append("say:\($0)") }
+    lp3.onDraw = { played3.append("draw:\($0.tool)") }
+    lp3.append([.say("a"), .draw(lineShape), .say("b")])
+    assert(played3 == ["say:a", "draw:line", "say:b"],
+           "voiceReplies off must not stall the queue: \(played3)")
+
     // A right triangle can't come from a bounding box — 3 points must reach the path as given.
     let tri = DrawnShape(tool: .triangle,
                          points: [CGPoint(x: 0, y: 100), CGPoint(x: 0, y: 0), CGPoint(x: 80, y: 100)],
