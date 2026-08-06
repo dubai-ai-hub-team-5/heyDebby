@@ -117,6 +117,7 @@ final class AppState: ObservableObject {
         UserDefaults.standard.object(forKey: "voiceReplies") == nil ? true : UserDefaults.standard.bool(forKey: "voiceReplies")
     }
     var agentFullAccess: Bool { UserDefaults.standard.bool(forKey: "agentFullAccess") }
+    var appControl: Bool { UserDefaults.standard.bool(forKey: "appControl") }
     var backend: String { resolveBackend(UserDefaults.standard.string(forKey: "backend") ?? "") }
 
     /// Agents exist mostly to touch your apps, and `codex exec` auto-denies every
@@ -582,6 +583,16 @@ final class AppState: ObservableObject {
                 self.drawingController.start(on: screen, interactive: false)
             }
             self.drawingController.shapes.append(shape)
+        }
+        player.onRun = { [weak self] script in
+            guard let self, self.chatGeneration == gen, self.appControl else { return }
+            Control.run([script]) { [weak self] code, out in
+                guard code != 0 else { return }
+                // Automation denial and "app isn't running" both land here, and both are
+                // things only the user can fix — so say them rather than only logging.
+                let msg = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                self?.show("⚠️ \(msg.isEmpty ? "that didn't work" : String(msg.prefix(160)))")
+            }
         }
         // The lesson advances when the narration actually ends, not on a timer.
         player.onIdle = { [weak self] in

@@ -11,6 +11,9 @@ final class LessonPlayer {
     var onSay: ((String) -> Void)?
     var onDraw: ((ShapeSpec) -> Void)?
     var onPoint: ((Annotation) -> Void)?
+    /// Fires and continues, like `.draw`/`.point` — no callback exists for an
+    /// AppleScript's completion, and waiting on one would stall the whole lesson.
+    var onRun: ((String) -> Void)?
     /// Queue drained and no more beats coming — where auto-advance hangs off.
     var onIdle: (() -> Void)?
 
@@ -66,10 +69,7 @@ final class LessonPlayer {
             case .say(let t):
                 if speechEnabled { speaking = true }
                 onSay?(t)
-            case .run(let script):
-                // ponytail: not wired to osascript yet — a later task adds an onRun
-                // callback here. Dropping it keeps the queue draining in the meantime.
-                DebbyLog.write("LESSON RUN: dropped, execution not wired yet: \(script.prefix(120))")
+            case .run(let s):   onRun?(s)
             }
         }
         if !speaking, queue.isEmpty, !streamOpen, !idleFired {

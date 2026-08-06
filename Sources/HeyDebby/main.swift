@@ -268,6 +268,18 @@ func runSelfCheck() {
     assert(played3 == ["say:a", "draw:line", "say:b"],
            "voiceReplies off must not stall the queue: \(played3)")
 
+    // A .run beat fires in order and does not block what follows, unlike .say.
+    let lp6 = LessonPlayer()
+    var played6: [String] = []
+    lp6.onSay = { played6.append("say:\($0)") }
+    lp6.onRun = { played6.append("run:\($0)") }
+    lp6.append([.run("beep"), .say("hello"), .run("beep 2")])
+    assert(played6 == ["run:beep", "say:hello"],
+           "a run before a sentence fires immediately; the one after it waits: \(played6)")
+    lp6.speechFinished()
+    assert(played6 == ["run:beep", "say:hello", "run:beep 2"],
+           "the trailing run fires once the sentence ends: \(played6)")
+
     // A right triangle can't come from a bounding box — 3 points must reach the path as given.
     let tri = DrawnShape(tool: .triangle,
                          points: [CGPoint(x: 0, y: 100), CGPoint(x: 0, y: 0), CGPoint(x: 80, y: 100)],
