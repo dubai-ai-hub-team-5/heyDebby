@@ -1,0 +1,272 @@
+import Foundation
+
+/// A point marker (x,y) or, when w/h are present, a marked area with top-left (x,y).
+/// All values are normalized top-left-origin fractions of the screenshot.
+struct Annotation: Codable {
+    let x: Double
+    let y: Double
+    var w: Double?
+    var h: Double?
+    let label: String
+
+    init(x: Double, y: Double, w: Double? = nil, h: Double? = nil, label: String) {
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.label = label
+    }
+}
+
+/// A shape the AI wants drawn on the canvas. Coordinates are normalized [0,1] fractions
+/// of the screenshot (same space as Annotation), mapped to screen pixels before rendering.
+struct ShapeSpec: Codable {
+    struct Point: Codable { let x: Double; let y: Double }
+    let tool: String       // matches DrawTool.rawValue: arrow, line, triangle, rectangle, circle, curve, text
+    let points: [Point]    // 1 point for text; 2 for most tools; 3+ for polygons/curves
+    var color: String?     // orange (default), red, blue, green, yellow, white
+    var lineWidth: Double? // stroke width in points (default 3)
+    var label: String?     // text tool: the string to write at points[0]
+}
+
+/// Map an annotation from cropped-image space back to full-screen normalized space.
+/// `container` is the user-selected focus area (normalized, top-left origin), or nil.
+func mapToScreen(_ a: Annotation, container: CGRect?) -> Annotation {
+    guard let c = container else { return a }
+    return Annotation(x: c.minX + a.x * c.width, y: c.minY + a.y * c.height,
+                      w: a.w.map { $0 * c.width }, h: a.h.map { $0 * c.height },
+                      label: a.label)
+}
+
+/// Finds `MARKER: [ … ]` anywhere in `text` and returns the JSON array plus the span to cut.
+///
+/// Deliberately not line-based: Gemini pretty-prints its JSON across several lines and likes
+/// to wrap it in ``` fences or **bold**, none of which a `hasPrefix("DRAWINGS:")` check survives.
+/// Brackets are matched by depth, skipping anything inside a JSON string (labels may contain `[`).
+private func extractBlock(_ marker: String, from text: String) -> (json: String, range: Range<String.Index>)? {
+    guard let m = text.range(of: marker, options: .caseInsensitive),
+          let open = text[m.upperBound...].firstIndex(of: "[") else { return nil }
+    var depth = 0, inString = false, escaped = false
+    var i = open
+    while i < text.endIndex {
+        let c = text[i]
+        if escaped {
+            escaped = false
+        } else if c == "\\" && inString {
+            escaped = true
+        } else if c == "\"" {
+            inString.toggle()
+        } else if !inString {
+            if c == "[" {
+                depth += 1
+            } else if c == "]" {
+                depth -= 1
+                if depth == 0 {
+                    let close = text.index(after: i)
+                    return (String(text[open..<close]), m.lowerBound..<close)
+                }
+            }
+        }
+        i = text.index(after: i)
+    }
+    return nil  // unterminated: a truncated reply, not something to half-parse
+}
+
+/// A model reply split into its parts. A struct, not a tuple: this has grown twice and each
+/// time every `let (a, b) =` call site broke at compile time for no good reason.
+struct ParsedReply {
+    var text = ""                     // what gets shown and spoken
+    var annotations: [Annotation] = []
+    var drawings: [ShapeSpec] = []
+    var more = false                  // the model says this lesson has another step
+}
+
+/// Splits a model reply, stripping the ANNOTATIONS:, DRAWINGS: and MORE: markers regardless
+/// of order.
+func parseReply(_ text: String) -> ParsedReply {
+    var out = ParsedReply()
+    var clean = text
+
+    if let b = extractBlock("DRAWINGS:", from: clean) {
+        out.drawings = (try? JSONDecoder().decode([ShapeSpec].self, from: Data(b.json.utf8))) ?? []
+        clean.removeSubrange(b.range)
+    }
+    if let b = extractBlock("ANNOTATIONS:", from: clean) {
+        out.annotations = (try? JSONDecoder().decode([Annotation].self, from: Data(b.json.utf8))) ?? []
+        clean.removeSubrange(b.range)
+    }
+    // MORE: is a bare marker, not JSON — the model writes it when a lesson has another step.
+    if let m = clean.range(of: "MORE:", options: .caseInsensitive) {
+        let rest = clean[m.upperBound...]
+        let line = rest.prefix(while: { !$0.isNewline })
+        out.more = line.lowercased().contains("yes")
+        clean.removeSubrange(m.lowerBound..<(clean.index(m.upperBound, offsetBy: line.count)))
+    }
+    // Fences and bold markers left behind by the cut — and by prose generally. The clean
+    // text is spoken aloud, where "**" is noise.
+    for junk in ["```json", "```", "**"] {
+        clean = clean.replacingOccurrences(of: junk, with: "")
+    }
+    out.text = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+    return out
+}
+
+/// Screen width ÷ height, set from the display being drawn on. Coordinates are fractions of
+/// each axis separately, so on a wide screen 0.1 of x is much longer than 0.1 of y — without
+/// this number the model cannot make a square look square or a perpendicular be perpendicular.
+nonisolated(unsafe) var debbyScreenAspect: Double = 16.0 / 10.0
+
+enum Claude {
+    static var systemPrompt: String { promptTemplate(aspect: debbyScreenAspect) }
+
+    static func promptTemplate(aspect: Double) -> String {
+        let a = String(format: "%.2f", aspect)
+        return basePrompt + """
+
+
+        Geometry: the screen is \(a)× wider than it is tall, and x and y are fractions of their \
+        own axis — so equal x and y numbers are NOT equal on-screen lengths. An x-extent of \
+        s/\(a) matches a y-extent of s.
+        Do not try to compute a square on a slanted side yourself. Use the `square` tool with \
+        exactly TWO points, the endpoints of the side it stands on — {"tool":"square","points":\
+        [P,Q]} — and the app builds the other two corners square and true.
+        A square sticks out from its side by the side's OWN length, away from the shape. So:
+        - Keep the figure small and central. A triangle whose sides are about 0.15–0.2 leaves room \
+        for squares on all three; sides of 0.4 will run off the screen. Every corner of every \
+        square must stay inside 0 to 1 on both axes.
+        - Which way it sticks out is decided by the order of the two points. Walk the sides as one \
+        loop in a single direction — P1→P2, then P2→P3, then P3→P1 — and every square lands on the \
+        outside. Reverse just one of them and that square folds back over the shape.
+        """
+    }
+
+    private static let basePrompt = """
+    You are Debby, a friendly AI buddy who lives on the user's Mac, right next to their cursor. \
+    Each user message includes a fresh screenshot of their screen. Help with whatever they're looking at: \
+    answer questions, explain UI, give guidance. Keep replies SHORT and conversational; they are spoken aloud.
+
+    Guide multi-step tasks ONE action per reply: name the action, point at its exact spot, and stop. \
+    When the user clicks, you automatically receive a fresh screenshot of the new screen state — \
+    verify what happened (gently correct them if they're off track), then point at the next action, \
+    until the task is done. Give exactly ONE annotation per step.
+
+    To point at a spot or mark a whole area, add a line:
+    ANNOTATIONS: [{"x":0.42,"y":0.18,"label":"File menu"}, {"x":0.1,"y":0.2,"w":0.3,"h":0.15,"label":"Toolbar"}]
+    An entry with only x,y points at a single spot. An entry with w,h marks a whole area whose \
+    top-left corner is (x,y). All values are fractions of the screenshot's width/height, top-left origin. \
+    Use an area for regions; use a point when the user should click. Omit when nothing to mark.
+
+    You CAN draw on the user's screen — shapes AND text — and you do it yourself. NEVER say you \
+    cannot draw, never say "picture this" or "imagine", and never ask the user to draw. If a visual \
+    helps, draw it. To draw, add a line:
+    DRAWINGS: [{"tool":"line","points":[{"x":0.3,"y":0.7},{"x":0.3,"y":0.35}],"color":"orange","lineWidth":4},{"tool":"text","points":[{"x":0.27,"y":0.52}],"label":"a","color":"orange"}]
+    Tools: line, arrow, triangle, polygon, rectangle, circle, curve, text.
+    - text writes label at its single point — use it for every side name, length, angle and formula.
+    - triangle takes 3 points for real vertices (use this for right triangles), or 2 for a \
+    bounding box. rectangle/circle take 2. line/arrow take start+end. curve takes many.
+    - square takes the two endpoints of a side and stands a true square on it — this is the ONLY \
+    correct way to draw the square on a leg or hypotenuse. Never use rectangle for that: rectangle \
+    is always upright, and a square on a slanted side is not. It must touch the side it belongs to, \
+    never float in empty space.
+    - polygon closes a shape through ALL its points — for any other shape that isn't axis-aligned.
+    Points are [0,1] fractions of the screenshot's width/height, top-left origin — same space as \
+    ANNOTATIONS, and both can appear in one reply. Colors: orange, white, red, blue, green, yellow. \
+    lineWidth defaults to 3.
+
+    Teaching by drawing: when the user asks you to explain, teach or show something visually, \
+    build the picture up over several replies instead of dumping it at once. Each reply draws the \
+    NEXT piece, says one or two sentences about just that piece, and stops. Place your drawing on \
+    empty screen space so it does not sit on top of what the user is reading. Label everything with \
+    the text tool; a shape with no labels teaches nothing.
+
+    Everything you have already drawn is STILL ON SCREEN, even though the screenshot never shows \
+    it — the screenshot is the user's own screen, without your drawings. Your earlier DRAWINGS \
+    lines are in this conversation: read the coordinates back from them. Emit only the NEW shapes \
+    each turn and never repeat a shape you already drew, or it will be drawn twice. Reuse the exact \
+    coordinates from your earlier lines so new pieces meet the old ones — if the base ran to \
+    {"x":0.2,"y":0.7}, the next leg starts at exactly {"x":0.2,"y":0.7}.
+
+    While a lesson still has steps left, end your reply with a line:
+    MORE: yes
+    That draws the next step by itself — the user does NOT have to say "continue". Never ask \
+    "shall I continue?" or "want me to keep going?"; just add MORE: yes and keep teaching. Omit \
+    the line on the last step, or when you are not mid-lesson.
+
+    The screenshot may be cropped to a focus area the user selected — treat it as the whole context \
+    and place all coordinates relative to THIS image.
+
+    You cannot act on apps yourself, but the user's background agents can (Gmail, Calendar, Notion, \
+    Slack, GitHub and more, via Composio). When the user asks for something in their apps — check \
+    email, schedule, send a message, update a doc — tell them to say or type "agent: <the task>".
+    """
+
+    /// Same trick the Codex backend uses for a ChatGPT plan: shell out to the CLI that
+    /// already holds the login, so no API key is involved. Vision goes by file path —
+    /// the CLI reads the screenshot itself, which is why Read has to be allowed.
+    enum CLI {
+        static var isLoggedIn: Bool {
+            guard let d = try? Data(contentsOf: URL(fileURLWithPath: NSHomeDirectory() + "/.claude.json")),
+                  let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return false }
+            return o["oauthAccount"] != nil
+        }
+
+        static func send(history: [(role: String, text: String)],
+                         userText: String, imagePath: String?) async throws -> String {
+            var prompt = ""
+            for h in history.suffix(6) {
+                prompt += (h.role == "user" ? "Me: " : "You: ") + h.text + "\n"
+            }
+            if let p = imagePath {
+                prompt += "\nA screenshot of my screen right now is at \(p) — read that image first.\n"
+            }
+            prompt += "\nMe: " + userText
+            // --allowedTools is variadic, so it must come last or it eats what follows.
+            let cmd = "claude -p \(shellQuote(prompt)) --output-format text"
+                + " --system-prompt \(shellQuote(systemPrompt)) --allowedTools Read"
+            let out = try await shellOutput(cmd).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !out.isEmpty else {
+                throw NSError(domain: "claude-cli", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                    "The claude CLI returned nothing. Is it signed in? Run `claude` once in a terminal."])
+            }
+            return out
+        }
+    }
+
+    static func send(apiKey: String, model: String, history: [(role: String, text: String)],
+                     userText: String, imageB64: String) async throws -> String {
+        var messages: [[String: Any]] = history.map { ["role": $0.role, "content": $0.text] }
+        messages.append([
+            "role": "user",
+            "content": [
+                ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": imageB64]],
+                ["type": "text", "text": userText],
+            ],
+        ])
+        let body: [String: Any] = [
+            "model": model,
+            "max_tokens": 1024,
+            "system": systemPrompt,
+            "messages": messages,
+        ]
+        var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+        req.httpMethod = "POST"
+        req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+        guard status == 200 else {
+            let apiMsg = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
+                .flatMap { ($0["error"] as? [String: Any])?["message"] as? String }
+            throw NSError(domain: "claude", code: status, userInfo: [NSLocalizedDescriptionKey:
+                "API error \(status): \(apiMsg ?? String(data: data, encoding: .utf8) ?? "unknown")"])
+        }
+        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let content = obj["content"] as? [[String: Any]] else {
+            throw NSError(domain: "claude", code: -2, userInfo: [NSLocalizedDescriptionKey: "Malformed API response"])
+        }
+        return content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined()
+    }
+}

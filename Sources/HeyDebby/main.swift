@@ -1,0 +1,323 @@
+import AppKit
+import SwiftUI
+
+func runSelfCheck() {
+    let r1 = parseReply("Click the File menu.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"label\":\"File\"}]")
+    assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
+    assert(r1.annotations.count == 1 && r1.annotations[0].label == "File" && abs(r1.annotations[0].x - 0.1) < 0.0001, "annotation parse wrong")
+    let r2 = parseReply("No pointing needed.")
+    assert(r2.text == "No pointing needed." && r2.annotations.isEmpty)
+    let r3 = parseReply("Look here.\nANNOTATIONS: not json")
+    assert(r3.annotations.isEmpty, "bad json should yield no annotations")
+
+    // Gemini pretty-prints its JSON, bolds the marker and fences the block. All of that used
+    // to fall straight through the old line-prefix parser and draw nothing.
+    let messy = """
+    Here's the triangle.
+    **DRAWINGS:** ```json
+    [
+      {"tool":"triangle","points":[{"x":0.2,"y":0.7},{"x":0.2,"y":0.3},{"x":0.6,"y":0.7}],"color":"orange"},
+      {"tool":"text","points":[{"x":0.17,"y":0.5}],"label":"a"}
+    ]
+    ```
+    """
+    let rM = parseReply(messy)
+    assert(rM.drawings.count == 2, "multi-line/fenced DRAWINGS must parse: \(rM.drawings.count)")
+    assert(rM.drawings[0].points.count == 3, "3-vertex triangle must survive")
+    assert(rM.drawings[1].label == "a", "text label must survive")
+    assert(rM.text == "Here's the triangle.", "block + fences must leave the spoken text: \(rM.text)")
+    // A label containing a bracket must not end the array early.
+    let rB = parseReply(#"DRAWINGS: [{"tool":"text","points":[{"x":0.1,"y":0.1}],"label":"c] "}]"#)
+    assert(rB.drawings.count == 1 && rB.drawings[0].label == "c] ", "brackets inside a label must not close the array")
+    // Truncated JSON (the MAX_TOKENS case) parses to nothing rather than half a picture.
+    let rC = parseReply(#"DRAWINGS: [{"tool":"line","points":[{"x":0.1,"y":0.1},"#)
+    assert(rC.drawings.isEmpty, "truncated DRAWINGS must not half-parse")
+
+    // A right triangle can't come from a bounding box — 3 points must reach the path as given.
+    let tri = DrawnShape(tool: .triangle,
+                         points: [CGPoint(x: 0, y: 100), CGPoint(x: 0, y: 0), CGPoint(x: 80, y: 100)],
+                         color: .orange, lineWidth: 3)
+    assert(tri.buildPath().boundingRect == CGRect(x: 0, y: 0, width: 80, height: 100),
+           "3-point triangle must use its own vertices: \(tri.buildPath().boundingRect)")
+    assert(DrawnShape(tool: .text, points: [.zero], color: .orange, lineWidth: 3, label: "a")
+        .buildPath().isEmpty, "text is drawn as text, never stroked")
+    assert(!DrawTool.manual.contains(.text), "no way to type a label by hand — keep it out of the toolbar")
+    // A square on a hypotenuse is rotated; rectangle is axis-aligned, so polygon is the only
+    // tool that can express it. It must close, and it must keep every vertex.
+    let sq = DrawnShape(tool: .polygon,
+                        points: [CGPoint(x: 0, y: 0), CGPoint(x: 30, y: 40),
+                                 CGPoint(x: -10, y: 70), CGPoint(x: -40, y: 30)],
+                        color: .red, lineWidth: 3)
+    assert(sq.buildPath().boundingRect == CGRect(x: -40, y: 0, width: 70, height: 70),
+           "rotated square must keep all 4 vertices: \(sq.buildPath().boundingRect)")
+    var sqClosed = false
+    sq.buildPath().forEach { if case .closeSubpath = $0 { sqClosed = true } }
+    assert(sqClosed, "polygon must close back to its first point")
+
+    // The square tool does the perpendicular the model kept getting wrong: given the side
+    // (0,0)→(30,40) it must produce a true 50×50 square standing on it, not a parallelogram.
+    let onSide = DrawnShape(tool: .square, points: [CGPoint(x: 0, y: 0), CGPoint(x: 30, y: 40)],
+                            color: .blue, lineWidth: 3)
+    assert(onSide.buildPath().boundingRect == CGRect(x: -40, y: 0, width: 70, height: 70),
+           "square on a slanted side is wrong: \(onSide.buildPath().boundingRect)")
+    let flipped = DrawnShape(tool: .square, points: [CGPoint(x: 30, y: 40), CGPoint(x: 0, y: 0)],
+                             color: .blue, lineWidth: 3)
+    assert(flipped.buildPath().boundingRect == CGRect(x: 0, y: -30, width: 70, height: 70),
+           "swapping the endpoints must flip which side the square stands on")
+
+    // MORE: yes drives the lesson forward without the user saying "continue" each step.
+    let step = parseReply("Now side b.\nDRAWINGS: [{\"tool\":\"line\",\"points\":[{\"x\":0.1,\"y\":0.1},{\"x\":0.2,\"y\":0.2}]}]\nMORE: yes")
+    assert(step.more && step.drawings.count == 1, "MORE: yes must mean another step is queued")
+    assert(step.text == "Now side b.", "the MORE marker must not be spoken: \(step.text)")
+    assert(!parseReply("All done — that's the theorem.").more, "no marker means the lesson ended")
+    assert(agentTask(from: "agent: clean up my desktop") == "clean up my desktop")
+    assert(agentTask(from: "Hey Debby Agent build me a webpage") == "build me a webpage")
+    assert(agentTask(from: "what does this button do") == nil)
+    assert(agentTask(from: "agents are cool right") == nil)
+    assert(shellQuote("it's") == "'it'\\''s'")
+    let cx = agentCommand(backend: "codex", task: "hi", screenshotPath: "/tmp/s.jpg", fullAccess: false)
+    assert(cx.contains("codex exec --skip-git-repo-check") && cx.contains("-i '/tmp/s.jpg'")
+           && cx.contains("-s read-only") && cx.hasSuffix("'hi'"), "codex cmd wrong: \(cx)")
+    assert(agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: true)
+        .contains("--dangerously-bypass-approvals-and-sandbox"))
+    assert(agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: true)
+        .contains("claude -p --dangerously-skip-permissions"))
+    // Without an allowlist `claude -p` denies every tool, so app tasks fail silently.
+    // The prompt must come before --allowedTools, which is variadic and eats what follows.
+    let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false)
+    assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep"), "claude agent needs tools: \(cl)")
+    assert(cl.range(of: "'email bob'")!.upperBound <= cl.range(of: "--allowedTools")!.lowerBound,
+           "prompt must precede the variadic flag: \(cl)")
+    let mid = mapToScreen(Annotation(x: 0.5, y: 0.5, label: "t"),
+                          container: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5))
+    assert(abs(mid.x - 0.5) < 1e-9 && abs(mid.y - 0.5) < 1e-9, "container center mapping wrong")
+    let corner = mapToScreen(Annotation(x: 0.0, y: 1.0, label: "t"),
+                             container: CGRect(x: 0.2, y: 0.1, width: 0.4, height: 0.6))
+    assert(abs(corner.x - 0.2) < 1e-9 && abs(corner.y - 0.7) < 1e-9, "container corner mapping wrong")
+    let noC = mapToScreen(Annotation(x: 0.3, y: 0.4, label: "t"), container: nil)
+    assert(noC.x == 0.3 && noC.y == 0.4)
+    let rA = parseReply("The toolbar.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"w\":0.3,\"h\":0.15,\"label\":\"Toolbar\"}]")
+    assert(rA.annotations.count == 1 && rA.annotations[0].w == 0.3 && rA.annotations[0].h == 0.15, "area annotation parse wrong")
+    let ra = mapToScreen(Annotation(x: 0.0, y: 0.0, w: 0.5, h: 0.5, label: "t"),
+                         container: CGRect(x: 0.5, y: 0.5, width: 0.5, height: 0.5))
+    assert(abs(ra.x - 0.5) < 1e-9 && abs((ra.w ?? 0) - 0.25) < 1e-9 && abs((ra.h ?? 0) - 0.25) < 1e-9,
+           "area container mapping wrong")
+
+    assert(isTalkChord([.control, .option]), "⌃⌥ is the talk chord")
+    assert(isTalkChord([.control, .option, .capsLock]), "caps lock must not block talking")
+    assert(!isTalkChord([.control]) && !isTalkChord([.option]), "one modifier is not the chord")
+    assert(!isTalkChord([.control, .option, .command]) && !isTalkChord([.control, .option, .shift]),
+           "⌘/⇧ means the user is driving an app shortcut, not talking")
+
+    // Auto prefers a subscription that's already signed in; the API key is the last resort.
+    assert(resolveBackend("", codex: true, claudeCLI: true) == "codex")
+    assert(resolveBackend("", codex: false, claudeCLI: true) == "claudecli")
+    assert(resolveBackend("", codex: false, claudeCLI: false) == "claude")
+    assert(resolveBackend("claudecli", codex: true, claudeCLI: false) == "claudecli", "explicit choice wins")
+    assert(resolveBackend("garbage", codex: false, claudeCLI: true) == "claudecli", "unknown value means Auto")
+
+    assert(micLevel(rms: 0) == 0 && micLevel(rms: 1) == 1, "mic level must clamp to 0…1")
+    assert(micLevel(rms: 0.03) > 0.25 && micLevel(rms: 0.03) < 0.6, "speaking voice should sit mid-scale")
+    assert(micLevel(rms: 0.0005) == 0, "a quiet room must not wiggle the bars")
+
+    // Notch surface: top-centred on the screen, growing downward when it opens.
+    let scr = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let shut = notchRect(screen: scr, collapsed: CGSize(width: 200, height: 32), expanded: false)
+    assert(shut == CGRect(x: 400, y: 768, width: 200, height: 32), "collapsed notch rect wrong: \(shut)")
+    let open = notchRect(screen: scr, collapsed: CGSize(width: 200, height: 32), expanded: true)
+    assert(open.maxY == scr.maxY && open.midX == scr.midX && open.width == NotchMetrics.expanded.width,
+           "open notch must stay pinned to the top centre: \(open)")
+    assert(open.contains(CGPoint(x: 500, y: 760)) && !shut.contains(CGPoint(x: 500, y: 760)),
+           "opening must widen the hover target")
+}
+
+if CommandLine.arguments.contains("--selfcheck") {
+    runSelfCheck()
+    print("selfcheck OK")
+    exit(0)
+}
+
+// What the HUD measured on this Mac's display (the one thing that differs per machine),
+// plus `--notchcheck out.png` to render the HUD offscreen and eyeball it without a screenshot.
+if let i = CommandLine.arguments.firstIndex(of: "--notchcheck") {
+    MainActor.assumeIsolated {
+        _ = NSApplication.shared
+        let s = NSScreen.notchHost
+        print("screen \(s.frame) safeTop \(s.safeAreaInsets.top) aux \(String(describing: s.auxiliaryTopLeftArea))")
+        print("collapsed \(s.collapsedNotch)")
+        DebbyLog.write("notchcheck")
+        print("log \(DebbyLog.url.path) exists=\(FileManager.default.fileExists(atPath: DebbyLog.url.path))")
+        // Not checking AXIsProcessTrusted here: run from a shell, TCC attributes the
+        // check to the parent shell and always says no. The app logs the real answer
+        // at launch — `log show --predicate 'process == "HeyDebby"'`.
+        print("shut \(notchRect(screen: s.frame, collapsed: s.collapsedNotch, expanded: false))")
+        print("open \(notchRect(screen: s.frame, collapsed: s.collapsedNotch, expanded: true))")
+        guard CommandLine.arguments.count > i + 1 else { return }
+        // Settings is its own window sized from fittingSize — a zero size here means a broken window.
+        print("settings fits \(NSHostingView(rootView: SettingsView()).fittingSize)")
+        if let png = ImageRenderer(content: SettingsView().background(Color(white: 0.92))).nsImage?
+            .tiffRepresentation.flatMap({ NSBitmapImageRep(data: $0) })?.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1] + ".settings.png"))
+        }
+        let state = AppState()
+        state.isListening = true
+        state.partial = "why is this build failing"
+        state.container = CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.4)
+        state.levels = (0..<28).map { CGFloat(abs(sin(Double($0) * 0.8)) * 0.85 + 0.1) }
+        let sheet = VStack(spacing: 12) {
+            NotchView().environmentObject(state)
+            // The pointer at 4x, triangle vs. listening — they must occupy the same box.
+            HStack(spacing: 40) {
+                DebbyPointerView().environmentObject(AppState())
+                DebbyPointerView().environmentObject(state)
+            }
+            .scaleEffect(4)
+            .frame(height: 140)
+        }
+        .frame(width: 520, height: 360)
+        .background(Color(white: 0.35))
+        let r = ImageRenderer(content: sheet)
+        r.scale = 2
+        if let png = r.nsImage?.tiffRepresentation.flatMap({ NSBitmapImageRep(data: $0) })?
+            .representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+            print("wrote \(CommandLine.arguments[i + 1])")
+        }
+    }
+    exit(0)
+}
+
+// Headless check of the Codex-subscription link: prints only the model's reply.
+if CommandLine.arguments.contains("--codex-check") {
+    let sem = DispatchSemaphore(value: 0)
+    Task.detached {
+        do {
+            let env = ProcessInfo.processInfo.environment
+            let imgB64 = env["DEBBY_IMG"].flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)).base64EncodedString() }
+            let reply = try await Codex.send(model: env["DEBBY_MODEL"] ?? Codex.defaultModel, history: [],
+                                             userText: env["DEBBY_PROMPT"] ?? "Reply with exactly: CODEX LINK OK",
+                                             imageB64: imgB64)
+            print(reply)
+        } catch {
+            print("ERR: \(error.localizedDescription)")
+        }
+        sem.signal()
+    }
+    sem.wait()
+    exit(0)
+}
+
+// Headless check of the Gemini link: prints the reply and what parsed out of it, so a
+// "why didn't it draw" can be answered without the notch, a screenshot or the mic.
+// Key comes from the same place the app reads it; it is never printed.
+if CommandLine.arguments.contains("--gemini-check") {
+    let sem = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var parsed: [ShapeSpec] = []   // handed to the main thread after sem.wait()
+    Task.detached {
+        let env = ProcessInfo.processInfo.environment
+        let stored = UserDefaults.standard.string(forKey: "geminiApiKey") ?? ""
+        let key = stored.isEmpty ? (env["GOOGLE_API_KEY"] ?? env["GEMINI_API_KEY"] ?? "") : stored
+        let model = env["DEBBY_MODEL"] ?? UserDefaults.standard.string(forKey: "geminiModel") ?? ""
+        guard !key.isEmpty else { print("ERR: no Gemini key configured"); sem.signal(); return }
+        do {
+            let imgB64 = env["DEBBY_IMG"].flatMap {
+                try? Data(contentsOf: URL(fileURLWithPath: $0)).base64EncodedString()
+            } ?? ""
+            // DEBBY_PROMPT2 replays a second turn with the first reply in history — the only way
+            // to check that step 2 of a diagram lands on step 1 rather than somewhere new.
+            var history: [(role: String, text: String)] = []
+            var turns = [env["DEBBY_PROMPT"] ?? "Teach me the Pythagorean theorem by drawing it."]
+            if let p2 = env["DEBBY_PROMPT2"] { turns.append(p2) }
+            for (n, userText) in turns.enumerated() {
+                let reply = try await Gemini.send(apiKey: key, model: model, history: history,
+                                                  userText: userText, imageB64: imgB64)
+                let p = parseReply(reply)
+                print("--- turn \(n + 1) reply ---\n\(reply)")
+                print("--- parsed --- spoken=\(p.text.count) chars, annotations=\(p.annotations.count),"
+                      + " drawings=\(p.drawings.count), more=\(p.more)")
+                for d in p.drawings { print("  \(d.tool) pts=\(d.points.count) label=\(d.label ?? "-")") }
+                history.append((role: "user", text: userText))
+                history.append((role: "assistant", text: reply))  // same as AppState: JSON kept
+                parsed += p.drawings                               // canvas accumulates, so does this
+            }
+        } catch {
+            print("ERR: \(error.localizedDescription)")
+        }
+        sem.signal()
+    }
+    sem.wait()
+    // DEBBY_OUT=x.png renders what would land on screen — parsing right and painting right are
+    // different failures. Must run here: the render is main-actor work and sem.wait() owns the
+    // main thread, so doing it inside the task above deadlocks.
+    if let out = ProcessInfo.processInfo.environment["DEBBY_OUT"], !parsed.isEmpty {
+        MainActor.assumeIsolated {
+            let size = CGSize(width: 1200, height: 800)
+            let c = DrawingController()
+            c.shapes = parsed.compactMap { s in
+                guard let tool = DrawTool(rawValue: s.tool),
+                      s.points.count >= (tool == .text ? 1 : 2) else { return nil }
+                return DrawnShape(tool: tool,
+                                  points: s.points.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) },
+                                  color: .orange, lineWidth: CGFloat(s.lineWidth ?? 3),
+                                  label: s.label ?? "")
+            }
+            let view = DrawingCanvasView(controller: c, size: size, interactive: false)
+                .background(Color(white: 0.15))
+            let r = ImageRenderer(content: view)
+            if let png = r.nsImage?.tiffRepresentation.flatMap({ NSBitmapImageRep(data: $0) })?
+                .representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: out))
+                print("wrote \(out) (\(c.shapes.count) shapes)")
+            }
+        }
+    }
+    exit(0)
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let state = AppState()
+    var statusItem: NSStatusItem!
+    var notch: NotchWindow!
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.button?.title = "👆"
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(talk)
+
+        notch = NotchWindow(state: state)
+        state.notch = notch
+        state.pointer.start(state: state)
+
+        Hotkey.watchTalkChord { [weak self] down, held in
+            self?.state.talkChord(down: down, heldFor: held)
+        }
+
+        // Registers the app in System Settings → Screen Recording and shows the
+        // system prompt once if not yet granted (grant requires an app relaunch).
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+        }
+        // ⌃⌥ is a modifier-only chord, so it's read from the global event stream —
+        // that needs Accessibility. Prompts if missing; the grant needs a relaunch.
+        let ax = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
+        NSLog("HeyDebby: accessibility=\(ax) — ⌃⌥ hold-to-talk is dead without it")
+    }
+
+    @objc func talk() { state.toggleListening() }
+
+    // Re-opening the app (Dock/Finder/`open`) starts listening.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        state.toggleListening()
+        return false
+    }
+}
+
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)
+    app.run()
+}
