@@ -169,6 +169,10 @@ func runSelfCheck() {
     lp5.closeStream()
     assert(played5 == ["say:one"], "cancel must stop playback: \(played5)")
     assert(idle5 == 0, "a cancelled lesson must not auto-advance")
+    // A streamed reply keeps arriving for seconds after ⌃⌥ interrupts it. Those deltas must
+    // not resurrect the lesson — that draws shapes and talks into a live microphone.
+    lp5.append([.say("three"), .draw(lineShape)])
+    assert(played5 == ["say:one"], "a cancelled lesson must ignore late beats: \(played5)")
 
     // Beats arriving after playback has started still queue behind the current sentence.
     let lp2 = LessonPlayer()

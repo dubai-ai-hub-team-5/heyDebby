@@ -19,13 +19,18 @@ final class LessonPlayer {
     private var speaking = false
     private var streamOpen = true
     private var idleFired = false
+    private var cancelled = false
 
     /// With `voiceReplies` off nothing ever reports back, so nothing may wait.
     init(speechEnabled: Bool = true) {
         self.speechEnabled = speechEnabled
     }
 
+    /// Beats that arrive after `cancel()` are not a reprieve: a stream the user interrupted
+    /// keeps delivering for seconds afterwards, and replaying them would draw shapes and
+    /// speak into the microphone that is now recording.
     func append(_ beats: [Beat]) {
+        guard !cancelled else { return }
         queue += beats
         pump()
     }
@@ -46,6 +51,7 @@ final class LessonPlayer {
     }
 
     func cancel() {
+        cancelled = true
         queue.removeAll()
         speaking = false
         streamOpen = false

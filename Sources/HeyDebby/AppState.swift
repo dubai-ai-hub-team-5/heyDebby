@@ -74,6 +74,9 @@ final class AppState: ObservableObject {
     private var activeScreen: NSScreen?
     private var runningAgents: [Process] = []
     private var lessonPlayer: LessonPlayer?
+    /// Raw stream text as far as it got, so a lesson that dies mid-flight can still tell
+    /// history what it already drew.
+    private var partialReply = ""
 
     init() {
         overlay.onHide = { [weak self] in
@@ -353,18 +356,24 @@ final class AppState: ObservableObject {
     }
 
     private func talk(_ text: String) {
-        if backend == "claude" && apiKey.isEmpty {
+        // `backend` re-reads UserDefaults on every access and @AppStorage writes land at once,
+        // so switching the Brain picker mid-request would otherwise change the answer between
+        // the switch below and the playback guard — replaying a streamed lesson, or dropping a
+        // finished reply. One read, one brain, for the whole turn.
+        let brain = backend
+        if brain == "claude" && apiKey.isEmpty {
             show("I need an Anthropic API key — open ⚙︎ in the notch and paste one (or switch the brain to Codex, or set ANTHROPIC_API_KEY).")
             return
         }
-        if backend == "gemini" && geminiApiKey.isEmpty {
+        if brain == "gemini" && geminiApiKey.isEmpty {
             show("I need a Google AI API key — open ⚙︎ in the notch and paste one (or set GOOGLE_API_KEY).")
             return
         }
-        if backend == "openai" && openaiApiKey.isEmpty {
+        if brain == "openai" && openaiApiKey.isEmpty {
             show("I need an OpenAI API key — open ⚙︎ in the notch and paste one (or set OPENAI_API_KEY).")
             return
         }
+        partialReply = ""
         isThinking = true
         let gen = chatGeneration
         // Snapshot: the same container/screen must be used for crop AND mapping,
@@ -378,7 +387,7 @@ final class AppState: ObservableObject {
                 let shot = try await Capture.screen(excludingSelf: true, cropTo: snapContainer,
                                                     displayID: screen.displayID)
                 let reply: String
-                switch backend {
+                switch brain {
                 case "codex":
                     reply = try await Codex.send(model: codexModel, history: history,
                                                  userText: text, imageB64: shot.base64)
@@ -402,7 +411,13 @@ final class AppState: ObservableObject {
                 }
                 // The HTTP backends logged nothing at all, so "it didn't draw" was undebuggable:
                 // no reply, no parse result, no way to tell a refusal from a dropped DRAWINGS line.
-                DebbyLog.write("CHAT \(backend) reply:\n\(reply)")
+                DebbyLog.write("CHAT \(brain) reply:\n\(reply)")
+                // Parsed for both paths: the streamed brain plays from the same BeatSplitter,
+                // which the self-check proves chunk-invariant, so these counts are what really
+                // played — and it's the brain that most needs field debugging.
+                let parsed = parseReply(reply)
+                let (clean, anns, drawings) = (parsed.text, parsed.annotations, parsed.drawings)
+                DebbyLog.write("PARSED annotations=\(anns.count) drawings=\(drawings.count) more=\(parsed.more)")
                 guard gen == chatGeneration else { return }  // user hit New / ✕ meanwhile
                 isThinking = false
                 history.append((role: "user", text: text))
@@ -414,10 +429,7 @@ final class AppState: ObservableObject {
                 if history.count > 20 { history.removeFirst(history.count - 20) }
                 // The streamed brain already played this lesson while it arrived; parsing and
                 // playing it a second time here would say every sentence twice.
-                if backend != "openai" {
-                    let parsed = parseReply(reply)
-                    let (clean, anns, drawings) = (parsed.text, parsed.annotations, parsed.drawings)
-                    DebbyLog.write("PARSED annotations=\(anns.count) drawings=\(drawings.count) more=\(parsed.more)")
+                if brain != "openai" {
                     show(clean)
                     // Snapshot once: voiceReplies can change mid-lesson, and a player built for
                     // speech must not have onSay start reading a live flag that later says "off"
@@ -434,7 +446,21 @@ final class AppState: ObservableObject {
             } catch {
                 guard gen == chatGeneration else { return }
                 isThinking = false
-                DebbyLog.write("CHAT ERROR (\(backend)) \(error.localizedDescription)")
+                DebbyLog.write("CHAT ERROR (\(brain)) \(error.localizedDescription)")
+                // A half-played lesson would keep narrating over the error: every onSay writes
+                // the notch, so the ⚠️ would be gone within a sentence. Stop it first.
+                lessonPlayer?.cancel()
+                lessonPlayer = nil
+                // Shapes are already on screen and those DRAW: coordinates are the only record
+                // of them, so a stream that died mid-lesson still has to reach history — else
+                // the next turn draws step 2 somewhere step 1 never was. Both turns or neither:
+                // Claude.send maps history straight into `messages`, and a dangling user turn
+                // there is two user messages in a row, which the API rejects.
+                if !partialReply.isEmpty {
+                    history.append((role: "user", text: text))
+                    history.append((role: "assistant", text: partialReply))
+                    if history.count > 20 { history.removeFirst(history.count - 20) }
+                }
                 show("⚠️ \(error.localizedDescription)")
             }
         }
@@ -476,20 +502,32 @@ final class AppState: ObservableObject {
             raw += chunk
             let beats = sp.feed(chunk)
             guard !beats.isEmpty else { return }
+            // Copy on this thread: `raw` keeps growing here, and reading it from the hop
+            // below would be a read racing an append.
+            let soFar = raw
             // onDelta lands on a URLSession queue; the player and every @Published flag are
             // main-only. DispatchQueue.main, not Task {}, because the hop has to preserve
             // order — the main queue guarantees FIFO, unstructured tasks do not, and beats
             // that arrive out of order are a shape drawn before the sentence that explains it.
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, self.chatGeneration == gen else { return }
+                    // Identity, not just generation: cancel() empties the queue but leaves the
+                    // player willing to work, this closure holds it strongly, and
+                    // startListening() is the one cancel path that does NOT bump the
+                    // generation. Without the `===` an interrupted lesson resurrects — shapes
+                    // drawn, click-watch armed, and a fresh sentence spoken straight into the
+                    // microphone that is now recording the user.
+                    guard let self, self.lessonPlayer === player,
+                          self.chatGeneration == gen else { return }
                     self.isThinking = false  // she's already talking; stop saying "thinking"
+                    self.partialReply = soFar
                     player.append(beats)
                 }
             }
         }
         // Resumes on the main actor behind every hop above — same queue, still in order.
         let tail = sp.finish()
+        guard lessonPlayer === player, chatGeneration == gen else { return raw }
         if !tail.isEmpty { player.append(tail) }
         player.closeStream()
         return raw
