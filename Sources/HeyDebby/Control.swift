@@ -29,10 +29,20 @@ enum Control {
         proc.standardOutput = pipe
         proc.standardError = pipe
         proc.standardInput = FileHandle.nullDevice
+        // Reading only in terminationHandler would deadlock: osascript blocks once the
+        // ~64KB pipe buffer fills, so it never exits and terminationHandler never fires.
+        // Drain as data arrives instead, same as AgentRunner.spawn.
+        // ponytail: output accumulates entirely in memory — fine for a line or two of
+        // AppleScript output; cap it here if a statement is ever seen printing megabytes.
+        let box = OutputBox()
+        pipe.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            if !d.isEmpty, let s = String(data: d, encoding: .utf8) { box.append(s) }
+        }
         DebbyLog.write("RUN osascript \(statements.joined(separator: " ; "))")
         proc.terminationHandler = { p in
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: data, encoding: .utf8) ?? ""
+            pipe.fileHandleForReading.readabilityHandler = nil
+            let text = box.text
             DebbyLog.write("RUN exit \(p.terminationStatus) \(text.prefix(200))")
             DispatchQueue.main.async { onDone(p.terminationStatus, text) }
         }

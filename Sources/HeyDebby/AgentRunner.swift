@@ -55,7 +55,8 @@ func shellOutput(_ cmd: String) async throws -> String {
 
 /// onOutput lands on the pipe's queue and onDone on the termination queue — different
 /// threads, so the buffer needs a lock rather than a bare captured var.
-private final class OutputBox: @unchecked Sendable {
+/// Internal (not private): Control.swift reuses this for the same reason.
+final class OutputBox: @unchecked Sendable {
     private let lock = NSLock()
     private var buf = ""
     func append(_ s: String) { lock.lock(); buf += s; lock.unlock() }
