@@ -147,6 +147,16 @@ func runSelfCheck() {
     assert(splitWhole("RUN: tell application \"Terminal.app\" to activate") == [],
            "a terminal named with a .app suffix must still be refused")
 
+    // --- Control: argv, not a shell string ---
+    assert(Control.arguments(for: ["set volume output volume 60"])
+           == ["-e", "set volume output volume 60"], "one statement, one -e pair")
+    assert(Control.arguments(for: ["a", "b"]) == ["-e", "a", "-e", "b"],
+           "statements run in order, each its own -e")
+    // The whole point of an arguments array: shell metacharacters are inert data.
+    let nasty = "tell app \"X\" to y'; rm -rf ~; echo '"
+    assert(Control.arguments(for: [nasty]) == ["-e", nasty],
+           "a payload with shell metacharacters must arrive verbatim, unquoted and unsplit")
+
     let r1 = parseReply("Click the File menu.\nPOINT: {\"x\":0.1,\"y\":0.2,\"label\":\"File\"}")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
     assert(r1.annotations.count == 1 && r1.annotations[0].label == "File"
