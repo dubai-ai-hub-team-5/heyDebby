@@ -70,7 +70,10 @@ enum Codex {
              "content": [["type": $0.role == "assistant" ? "output_text" : "input_text", "text": $0.text]]]
         }
         var content: [[String: Any]] = []
-        if let img = imageB64 {
+        // An empty (but non-nil) image_url is the same broken-key-looking 400 as Gemini's
+        // inlineData and OpenAI's input_image — a Swift String passed to this String? param
+        // promotes to Optional(""), which sails past `if let` unless isEmpty is checked too.
+        if let img = imageB64, !img.isEmpty {
             content.append(["type": "input_image", "image_url": "data:image/jpeg;base64,\(img)"])
         }
         content.append(["type": "input_text", "text": userText])

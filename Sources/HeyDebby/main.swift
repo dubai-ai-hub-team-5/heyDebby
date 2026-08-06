@@ -2,36 +2,201 @@ import AppKit
 import SwiftUI
 
 func runSelfCheck() {
-    let r1 = parseReply("Click the File menu.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"label\":\"File\"}]")
+    // --- BeatSplitter ---
+    let lesson = """
+    The hypotenuse is the long side. It faces the right angle.
+    DRAW: {"tool":"line","points":[{"x":0.3,"y":0.7},{"x":0.6,"y":0.4}],"color":"orange"}
+    Now the square that stands on it.
+    POINT: {"x":0.42,"y":0.18,"label":"File menu"}
+    MORE: yes
+    """
+    func splitWhole(_ s: String) -> [Beat] {
+        var sp = BeatSplitter()
+        var b = sp.feed(s)
+        b += sp.finish()
+        return b
+    }
+    let lb = splitWhole(lesson)
+    assert(lb.count == 5, "expected 4 sentences/markers + 1, got \(lb.count): \(lb)")
+    assert(lb[0] == .say("The hypotenuse is the long side."), "sentence 1 wrong: \(lb[0])")
+    assert(lb[1] == .say("It faces the right angle."), "sentence 2 wrong: \(lb[1])")
+    if case .draw(let s) = lb[2] {
+        assert(s.tool == "line" && s.points.count == 2 && abs(s.points[0].x - 0.3) < 1e-9,
+               "DRAW line did not decode: \(s)")
+    } else { assert(false, "beat 2 should be a draw, got \(lb[2])") }
+    assert(lb[3] == .say("Now the square that stands on it."), "sentence 3 wrong: \(lb[3])")
+    if case .point(let a) = lb[4] {
+        assert(a.label == "File menu" && abs(a.x - 0.42) < 1e-9, "POINT did not decode: \(a)")
+    } else { assert(false, "beat 4 should be a point, got \(lb[4])") }
+
+    // MORE: is a flag, not a beat, and is never spoken.
+    var moreSp = BeatSplitter()
+    _ = moreSp.feed(lesson)
+    _ = moreSp.finish()
+    assert(moreSp.more, "MORE: yes must set the flag")
+    assert(!splitWhole("All done — that's the theorem.").contains { $0 == .say("MORE: yes") },
+           "the MORE marker must never be spoken")
+
+    // The bug this parser would otherwise have: a chunk boundary anywhere must not
+    // change the output. SSE deltas split mid-word and mid-marker.
+    let chars = Array(lesson)
+    for cut in 1..<chars.count {
+        var sp = BeatSplitter()
+        var b = sp.feed(String(chars[..<cut]))
+        b += sp.feed(String(chars[cut...]))
+        b += sp.finish()
+        assert(b == lb, "split at \(cut) changed the beats:\n\(b)\nvs\n\(lb)")
+    }
+
+    // A decimal point is not a sentence end: no whitespace follows the dot.
+    assert(splitWhole("Pi is 3.14 exactly.") == [.say("Pi is 3.14 exactly.")],
+           "3.14 must not split: \(splitWhole("Pi is 3.14 exactly."))")
+
+    // One malformed shape must not kill the lesson around it.
+    let bad = splitWhole("First.\nDRAW: {not json}\nSecond.")
+    assert(bad == [.say("First."), .say("Second.")], "a bad DRAW line must be dropped alone: \(bad)")
+
+    let circle = "{\"tool\":\"circle\",\"points\":[{\"x\":0.1,\"y\":0.1},{\"x\":0.2,\"y\":0.2}]}"
+    // Decoration must be stripped, not spoken — asserting the count alone hid a bug where
+    // the fence characters were welded onto the sentences either side.
+    let fenced = splitWhole("Look.\n```json\nDRAW: \(circle)\n```\nDone.")
+    assert(fenced.count == 3, "fences must be ignored, not spoken: \(fenced)")
+    assert(fenced[0] == .say("Look.") && fenced[2] == .say("Done."),
+           "fence characters must not leak into speech: \(fenced)")
+    if case .draw(let c) = fenced[1] { assert(c.tool == "circle", "fenced DRAW wrong: \(c)") }
+    else { assert(false, "fenced DRAW was lost: \(fenced)") }
+
+    let bold = splitWhole("Look.\n**DRAW:** \(circle)\nDone.")
+    assert(bold.count == 3 && bold[0] == .say("Look.") && bold[2] == .say("Done."),
+           "a bolded marker must not leak into speech: \(bold)")
+    if case .draw = bold[1] {} else { assert(false, "a bolded DRAW must still parse: \(bold)") }
+
+    let bullet = splitWhole("Look.\n- DRAW: \(circle)\nDone.")
+    assert(bullet.count == 3 && bullet[0] == .say("Look.") && bullet[2] == .say("Done."),
+           "a bulleted marker must not leak a bullet into speech: \(bullet)")
+    if case .draw = bullet[1] {} else { assert(false, "a bulleted DRAW must still parse: \(bullet)") }
+
+    // A payload is data, not prose: asterisks inside a label must survive verbatim.
+    let starLabel = splitWhole("Note.\nDRAW: {\"tool\":\"text\",\"points\":[{\"x\":0.1,\"y\":0.1}],\"label\":\"very **important** note\"}\nEnd.")
+    if case .draw(let sl) = starLabel[1] {
+        assert(sl.label == "very **important** note",
+               "a label containing ** must not be rewritten: \(sl.label ?? "nil")")
+    } else { assert(false, "starred-label DRAW was lost: \(starLabel)") }
+
+    // Prose is spoken, so bold there is noise and must go.
+    assert(splitWhole("This is **really** important.") == [.say("This is really important.")],
+           "bold must be stripped from spoken prose: \(splitWhole("This is **really** important."))")
+
+    let r1 = parseReply("Click the File menu.\nPOINT: {\"x\":0.1,\"y\":0.2,\"label\":\"File\"}")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
-    assert(r1.annotations.count == 1 && r1.annotations[0].label == "File" && abs(r1.annotations[0].x - 0.1) < 0.0001, "annotation parse wrong")
+    assert(r1.annotations.count == 1 && r1.annotations[0].label == "File"
+           && abs(r1.annotations[0].x - 0.1) < 0.0001, "annotation parse wrong")
     let r2 = parseReply("No pointing needed.")
     assert(r2.text == "No pointing needed." && r2.annotations.isEmpty)
-    let r3 = parseReply("Look here.\nANNOTATIONS: not json")
+    let r3 = parseReply("Look here.\nPOINT: not json")
     assert(r3.annotations.isEmpty, "bad json should yield no annotations")
+    assert(r3.text == "Look here.", "a bad marker line must not be spoken: \(r3.text)")
 
-    // Gemini pretty-prints its JSON, bolds the marker and fences the block. All of that used
-    // to fall straight through the old line-prefix parser and draw nothing.
-    let messy = """
+    let rA = parseReply("Here.\nPOINT: {\"x\":0.1,\"y\":0.2,\"w\":0.3,\"h\":0.15,\"label\":\"Toolbar\"}")
+    assert(rA.annotations.count == 1 && rA.annotations[0].w == 0.3 && rA.annotations[0].h == 0.15,
+           "area annotation parse wrong")
+
+    let rM = parseReply("""
     Here's the triangle.
-    **DRAWINGS:** ```json
-    [
-      {"tool":"triangle","points":[{"x":0.2,"y":0.7},{"x":0.2,"y":0.3},{"x":0.6,"y":0.7}],"color":"orange"},
-      {"tool":"text","points":[{"x":0.17,"y":0.5}],"label":"a"}
-    ]
-    ```
-    """
-    let rM = parseReply(messy)
-    assert(rM.drawings.count == 2, "multi-line/fenced DRAWINGS must parse: \(rM.drawings.count)")
+    DRAW: {"tool":"triangle","points":[{"x":0.2,"y":0.7},{"x":0.5,"y":0.7},{"x":0.2,"y":0.4}]}
+    DRAW: {"tool":"text","points":[{"x":0.27,"y":0.52}],"label":"a"}
+    """)
+    assert(rM.drawings.count == 2, "two DRAW lines must parse: \(rM.drawings.count)")
     assert(rM.drawings[0].points.count == 3, "3-vertex triangle must survive")
     assert(rM.drawings[1].label == "a", "text label must survive")
-    assert(rM.text == "Here's the triangle.", "block + fences must leave the spoken text: \(rM.text)")
-    // A label containing a bracket must not end the array early.
-    let rB = parseReply(#"DRAWINGS: [{"tool":"text","points":[{"x":0.1,"y":0.1}],"label":"c] "}]"#)
-    assert(rB.drawings.count == 1 && rB.drawings[0].label == "c] ", "brackets inside a label must not close the array")
-    // Truncated JSON (the MAX_TOKENS case) parses to nothing rather than half a picture.
-    let rC = parseReply(#"DRAWINGS: [{"tool":"line","points":[{"x":0.1,"y":0.1},"#)
-    assert(rC.drawings.isEmpty, "truncated DRAWINGS must not half-parse")
+    assert(rM.text == "Here's the triangle.", "markers must leave the spoken text: \(rM.text)")
+
+    let rB = parseReply("Look.\nDRAW: {\"tool\":\"text\",\"points\":[{\"x\":0.1,\"y\":0.1}],\"label\":\"c] \"}")
+    assert(rB.drawings.count == 1 && rB.drawings[0].label == "c] ",
+           "brackets inside a label must not confuse the parser")
+
+    let step = parseReply("Now side b.\nDRAW: {\"tool\":\"line\",\"points\":[{\"x\":0.2,\"y\":0.7},{\"x\":0.5,\"y\":0.7}]}\nMORE: yes")
+    assert(step.more && step.drawings.count == 1, "MORE: yes must mean another step is queued")
+    assert(step.text == "Now side b.", "the MORE marker must not be spoken: \(step.text)")
+    assert(!parseReply("All done — that's the theorem.").more, "no marker means the lesson ended")
+
+    // --- LessonPlayer: a shape waits for the sentence in front of it ---
+    let lp = LessonPlayer()
+    var played: [String] = []
+    lp.onSay = { played.append("say:\($0)") }
+    lp.onDraw = { played.append("draw:\($0.tool)") }
+    lp.onPoint = { played.append("point:\($0.label)") }
+    var idleCount = 0
+    lp.onIdle = { idleCount += 1 }
+
+    let lineShape = ShapeSpec(tool: "line", points: [.init(x: 0, y: 0), .init(x: 1, y: 1)],
+                              color: nil, lineWidth: nil, label: nil)
+    lp.append([.say("one"), .draw(lineShape), .say("two")])
+    assert(played == ["say:one"],
+           "nothing may play while a sentence is still being spoken: \(played)")
+    lp.speechFinished()
+    assert(played == ["say:one", "draw:line", "say:two"],
+           "the shape must land between its two sentences: \(played)")
+    assert(idleCount == 0, "still speaking — not idle yet")
+    lp.speechFinished()
+    lp.closeStream()
+    assert(idleCount == 1, "queue drained and stream closed means idle")
+
+    // onIdle drives auto-advance: a second fire burns a lesson step and an API call.
+    lp.speechFinished()          // extra callback after the lesson already ended
+    lp.speechFinished()
+    // speechFinished() alone never reaches pump() once idle (guard speaking blocks it) —
+    // closeStream() is a second route into pump() that doesn't go through that guard, so
+    // this is what actually exercises the idleFired latch.
+    lp.closeStream()
+    assert(idleCount == 1, "onIdle must fire exactly once, got \(idleCount)")
+
+    // A cancel that arrives while nothing is speaking belongs to someone else.
+    let lp4 = LessonPlayer()
+    var played4: [String] = []
+    lp4.onSay = { played4.append("say:\($0)") }
+    lp4.onDraw = { played4.append("draw:\($0.tool)") }
+    lp4.speechFinished()         // stray callback before anything was queued
+    lp4.append([.say("a"), .draw(lineShape)])
+    assert(played4 == ["say:a"], "a stray speechFinished must not advance the queue: \(played4)")
+
+    // A cancelled lesson must go quiet and must never auto-advance.
+    let lp5 = LessonPlayer()
+    var played5: [String] = []
+    var idle5 = 0
+    lp5.onSay = { played5.append("say:\($0)") }
+    lp5.onDraw = { played5.append("draw:\($0.tool)") }
+    lp5.onIdle = { idle5 += 1 }
+    lp5.append([.say("one"), .draw(lineShape), .say("two")])
+    lp5.cancel()
+    lp5.speechFinished()
+    lp5.closeStream()
+    assert(played5 == ["say:one"], "cancel must stop playback: \(played5)")
+    assert(idle5 == 0, "a cancelled lesson must not auto-advance")
+    // A streamed reply keeps arriving for seconds after ⌃⌥ interrupts it. Those deltas must
+    // not resurrect the lesson — that draws shapes and talks into a live microphone.
+    lp5.append([.say("three"), .draw(lineShape)])
+    assert(played5 == ["say:one"], "a cancelled lesson must ignore late beats: \(played5)")
+
+    // Beats arriving after playback has started still queue behind the current sentence.
+    let lp2 = LessonPlayer()
+    var played2: [String] = []
+    lp2.onSay = { played2.append("say:\($0)") }
+    lp2.onDraw = { played2.append("draw:\($0.tool)") }
+    lp2.append([.say("first")])
+    lp2.append([.draw(lineShape)])
+    assert(played2 == ["say:first"], "a late-arriving shape must still wait: \(played2)")
+    lp2.speechFinished()
+    assert(played2 == ["say:first", "draw:line"], "…and play once the sentence ends: \(played2)")
+
+    // With speech off there is nothing to wait for.
+    let lp3 = LessonPlayer(speechEnabled: false)
+    var played3: [String] = []
+    lp3.onSay = { played3.append("say:\($0)") }
+    lp3.onDraw = { played3.append("draw:\($0.tool)") }
+    lp3.append([.say("a"), .draw(lineShape), .say("b")])
+    assert(played3 == ["say:a", "draw:line", "say:b"],
+           "voiceReplies off must not stall the queue: \(played3)")
 
     // A right triangle can't come from a bounding box — 3 points must reach the path as given.
     let tri = DrawnShape(tool: .triangle,
@@ -65,11 +230,6 @@ func runSelfCheck() {
     assert(flipped.buildPath().boundingRect == CGRect(x: 0, y: -30, width: 70, height: 70),
            "swapping the endpoints must flip which side the square stands on")
 
-    // MORE: yes drives the lesson forward without the user saying "continue" each step.
-    let step = parseReply("Now side b.\nDRAWINGS: [{\"tool\":\"line\",\"points\":[{\"x\":0.1,\"y\":0.1},{\"x\":0.2,\"y\":0.2}]}]\nMORE: yes")
-    assert(step.more && step.drawings.count == 1, "MORE: yes must mean another step is queued")
-    assert(step.text == "Now side b.", "the MORE marker must not be spoken: \(step.text)")
-    assert(!parseReply("All done — that's the theorem.").more, "no marker means the lesson ended")
     assert(agentTask(from: "agent: clean up my desktop") == "clean up my desktop")
     assert(agentTask(from: "Hey Debby Agent build me a webpage") == "build me a webpage")
     assert(agentTask(from: "what does this button do") == nil)
@@ -96,8 +256,6 @@ func runSelfCheck() {
     assert(abs(corner.x - 0.2) < 1e-9 && abs(corner.y - 0.7) < 1e-9, "container corner mapping wrong")
     let noC = mapToScreen(Annotation(x: 0.3, y: 0.4, label: "t"), container: nil)
     assert(noC.x == 0.3 && noC.y == 0.4)
-    let rA = parseReply("The toolbar.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"w\":0.3,\"h\":0.15,\"label\":\"Toolbar\"}]")
-    assert(rA.annotations.count == 1 && rA.annotations[0].w == 0.3 && rA.annotations[0].h == 0.15, "area annotation parse wrong")
     let ra = mapToScreen(Annotation(x: 0.0, y: 0.0, w: 0.5, h: 0.5, label: "t"),
                          container: CGRect(x: 0.5, y: 0.5, width: 0.5, height: 0.5))
     assert(abs(ra.x - 0.5) < 1e-9 && abs((ra.w ?? 0) - 0.25) < 1e-9 && abs((ra.h ?? 0) - 0.25) < 1e-9,
@@ -115,6 +273,8 @@ func runSelfCheck() {
     assert(resolveBackend("", codex: false, claudeCLI: false) == "claude")
     assert(resolveBackend("claudecli", codex: true, claudeCLI: false) == "claudecli", "explicit choice wins")
     assert(resolveBackend("garbage", codex: false, claudeCLI: true) == "claudecli", "unknown value means Auto")
+    assert(resolveBackend("openai", codex: true, claudeCLI: true) == "openai",
+           "an explicitly chosen brain must win over auto-detection")
 
     assert(micLevel(rms: 0) == 0 && micLevel(rms: 1) == 1, "mic level must clamp to 0…1")
     assert(micLevel(rms: 0.03) > 0.25 && micLevel(rms: 0.03) < 0.6, "speaking voice should sit mid-scale")
@@ -129,6 +289,37 @@ func runSelfCheck() {
            "open notch must stay pinned to the top centre: \(open)")
     assert(open.contains(CGPoint(x: 500, y: 760)) && !shut.contains(CGPoint(x: 500, y: 760)),
            "opening must widen the hover target")
+
+    // --- OpenAI SSE frames ---
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hy\",\"sequence_number\":1}") == "Hy",
+        "output_text.delta must yield its text")
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.created\",\"sequence_number\":0}") == nil,
+        "non-text events carry no delta")
+    assert(OpenAI.delta(fromSSELine: "data: [DONE]") == nil, "the DONE sentinel is not text")
+    assert(OpenAI.delta(fromSSELine: "") == nil, "SSE keep-alive blank lines are not text")
+    assert(OpenAI.delta(fromSSELine: "event: response.output_text.delta") == nil,
+           "only data: lines carry payloads")
+    assert(OpenAI.defaultModel == "gpt-5.6-luna", "default model changed without a decision")
+    // SSE only strips one leading space after the colon if present — a server (or a
+    // future OpenAI SDK revision) is free to omit it. Codex.swift's parser for this same
+    // endpoint family already tolerates that; this one must not silently drop the delta.
+    assert(OpenAI.delta(fromSSELine:
+        "data:{\"type\":\"response.output_text.delta\",\"delta\":\"Hy\",\"sequence_number\":1}") == "Hy",
+        "a missing space after 'data:' must not swallow the delta")
+    // The [DONE] sentinel check must compare the whole line, not search inside it — a
+    // delta whose actual text happens to be "[DONE]" is still real text to speak.
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"[DONE]\",\"sequence_number\":2}") == "[DONE]",
+        "a delta whose text is literally [DONE] must still come through")
+    // Other *.delta events carry a "delta" field too — only output_text is speech.
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking out loud\"}") == nil,
+        "a reasoning-summary delta must not reach the user's ears")
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"a\\\":1}\"}") == nil,
+        "a function-call-arguments delta is not speech")
 }
 
 if CommandLine.arguments.contains("--selfcheck") {

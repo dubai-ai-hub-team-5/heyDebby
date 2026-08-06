@@ -175,12 +175,18 @@ struct BeatSplitter {
 
     private static let markers = ["DRAW:", "POINT:", "MORE:"]
 
-    /// True while the buffer could still grow into a marker. Once it can't, the
-    /// characters are prose and can be released without waiting for the newline —
-    /// which is what lets speech start on the first sentence rather than the first line.
+    /// True while the buffer is still growing toward a marker, or has already become
+    /// one. Both halves are needed: the first holds "DRA" until it can be ruled out,
+    /// the second keeps holding once "DRAW:" is complete and its JSON is arriving —
+    /// without it the space after the colon ends the prefix match and the whole
+    /// marker line gets spoken as prose.
+    ///
+    /// Once neither holds, the characters are prose and can be released without
+    /// waiting for the newline — which is what lets speech start on the first
+    /// sentence rather than the first line.
     private static func couldBeMarker(_ s: String) -> Bool {
         let u = s.uppercased()
-        return markers.contains { $0.hasPrefix(u) }
+        return markers.contains { $0.hasPrefix(u) || u.hasPrefix($0) }
     }
 
     mutating func feed(_ chunk: String) -> [Beat] {
@@ -458,8 +464,9 @@ The feature itself, and the deletion of three timing guesses.
 **Files:**
 - Create: `Sources/HeyDebby/Lesson.swift`
 - Modify: `Sources/HeyDebby/AppState.swift:390-481` (the render-and-advance block inside `talk`)
-- Modify: `Sources/HeyDebby/Claude.swift` (delete the `annotations` / `drawings` compat extension)
 - Test: `Sources/HeyDebby/main.swift`
+
+The `annotations` / `drawings` extension in `Claude.swift` stays — the Task 2 selfcheck assertions read through it, and it is four lines.
 
 **Interfaces:**
 - Consumes: `Beat` (Task 1), `ParsedReply.beats` (Task 2).
