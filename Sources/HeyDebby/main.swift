@@ -87,36 +87,38 @@ func runSelfCheck() {
     assert(splitWhole("This is **really** important.") == [.say("This is really important.")],
            "bold must be stripped from spoken prose: \(splitWhole("This is **really** important."))")
 
-    let r1 = parseReply("Click the File menu.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"label\":\"File\"}]")
+    let r1 = parseReply("Click the File menu.\nPOINT: {\"x\":0.1,\"y\":0.2,\"label\":\"File\"}")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
-    assert(r1.annotations.count == 1 && r1.annotations[0].label == "File" && abs(r1.annotations[0].x - 0.1) < 0.0001, "annotation parse wrong")
+    assert(r1.annotations.count == 1 && r1.annotations[0].label == "File"
+           && abs(r1.annotations[0].x - 0.1) < 0.0001, "annotation parse wrong")
     let r2 = parseReply("No pointing needed.")
     assert(r2.text == "No pointing needed." && r2.annotations.isEmpty)
-    let r3 = parseReply("Look here.\nANNOTATIONS: not json")
+    let r3 = parseReply("Look here.\nPOINT: not json")
     assert(r3.annotations.isEmpty, "bad json should yield no annotations")
+    assert(r3.text == "Look here.", "a bad marker line must not be spoken: \(r3.text)")
 
-    // Gemini pretty-prints its JSON, bolds the marker and fences the block. All of that used
-    // to fall straight through the old line-prefix parser and draw nothing.
-    let messy = """
+    let rA = parseReply("Here.\nPOINT: {\"x\":0.1,\"y\":0.2,\"w\":0.3,\"h\":0.15,\"label\":\"Toolbar\"}")
+    assert(rA.annotations.count == 1 && rA.annotations[0].w == 0.3 && rA.annotations[0].h == 0.15,
+           "area annotation parse wrong")
+
+    let rM = parseReply("""
     Here's the triangle.
-    **DRAWINGS:** ```json
-    [
-      {"tool":"triangle","points":[{"x":0.2,"y":0.7},{"x":0.2,"y":0.3},{"x":0.6,"y":0.7}],"color":"orange"},
-      {"tool":"text","points":[{"x":0.17,"y":0.5}],"label":"a"}
-    ]
-    ```
-    """
-    let rM = parseReply(messy)
-    assert(rM.drawings.count == 2, "multi-line/fenced DRAWINGS must parse: \(rM.drawings.count)")
+    DRAW: {"tool":"triangle","points":[{"x":0.2,"y":0.7},{"x":0.5,"y":0.7},{"x":0.2,"y":0.4}]}
+    DRAW: {"tool":"text","points":[{"x":0.27,"y":0.52}],"label":"a"}
+    """)
+    assert(rM.drawings.count == 2, "two DRAW lines must parse: \(rM.drawings.count)")
     assert(rM.drawings[0].points.count == 3, "3-vertex triangle must survive")
     assert(rM.drawings[1].label == "a", "text label must survive")
-    assert(rM.text == "Here's the triangle.", "block + fences must leave the spoken text: \(rM.text)")
-    // A label containing a bracket must not end the array early.
-    let rB = parseReply(#"DRAWINGS: [{"tool":"text","points":[{"x":0.1,"y":0.1}],"label":"c] "}]"#)
-    assert(rB.drawings.count == 1 && rB.drawings[0].label == "c] ", "brackets inside a label must not close the array")
-    // Truncated JSON (the MAX_TOKENS case) parses to nothing rather than half a picture.
-    let rC = parseReply(#"DRAWINGS: [{"tool":"line","points":[{"x":0.1,"y":0.1},"#)
-    assert(rC.drawings.isEmpty, "truncated DRAWINGS must not half-parse")
+    assert(rM.text == "Here's the triangle.", "markers must leave the spoken text: \(rM.text)")
+
+    let rB = parseReply("Look.\nDRAW: {\"tool\":\"text\",\"points\":[{\"x\":0.1,\"y\":0.1}],\"label\":\"c] \"}")
+    assert(rB.drawings.count == 1 && rB.drawings[0].label == "c] ",
+           "brackets inside a label must not confuse the parser")
+
+    let step = parseReply("Now side b.\nDRAW: {\"tool\":\"line\",\"points\":[{\"x\":0.2,\"y\":0.7},{\"x\":0.5,\"y\":0.7}]}\nMORE: yes")
+    assert(step.more && step.drawings.count == 1, "MORE: yes must mean another step is queued")
+    assert(step.text == "Now side b.", "the MORE marker must not be spoken: \(step.text)")
+    assert(!parseReply("All done — that's the theorem.").more, "no marker means the lesson ended")
 
     // A right triangle can't come from a bounding box — 3 points must reach the path as given.
     let tri = DrawnShape(tool: .triangle,
@@ -150,11 +152,6 @@ func runSelfCheck() {
     assert(flipped.buildPath().boundingRect == CGRect(x: 0, y: -30, width: 70, height: 70),
            "swapping the endpoints must flip which side the square stands on")
 
-    // MORE: yes drives the lesson forward without the user saying "continue" each step.
-    let step = parseReply("Now side b.\nDRAWINGS: [{\"tool\":\"line\",\"points\":[{\"x\":0.1,\"y\":0.1},{\"x\":0.2,\"y\":0.2}]}]\nMORE: yes")
-    assert(step.more && step.drawings.count == 1, "MORE: yes must mean another step is queued")
-    assert(step.text == "Now side b.", "the MORE marker must not be spoken: \(step.text)")
-    assert(!parseReply("All done — that's the theorem.").more, "no marker means the lesson ended")
     assert(agentTask(from: "agent: clean up my desktop") == "clean up my desktop")
     assert(agentTask(from: "Hey Debby Agent build me a webpage") == "build me a webpage")
     assert(agentTask(from: "what does this button do") == nil)
@@ -181,8 +178,6 @@ func runSelfCheck() {
     assert(abs(corner.x - 0.2) < 1e-9 && abs(corner.y - 0.7) < 1e-9, "container corner mapping wrong")
     let noC = mapToScreen(Annotation(x: 0.3, y: 0.4, label: "t"), container: nil)
     assert(noC.x == 0.3 && noC.y == 0.4)
-    let rA = parseReply("The toolbar.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"w\":0.3,\"h\":0.15,\"label\":\"Toolbar\"}]")
-    assert(rA.annotations.count == 1 && rA.annotations[0].w == 0.3 && rA.annotations[0].h == 0.15, "area annotation parse wrong")
     let ra = mapToScreen(Annotation(x: 0.0, y: 0.0, w: 0.5, h: 0.5, label: "t"),
                          container: CGRect(x: 0.5, y: 0.5, width: 0.5, height: 0.5))
     assert(abs(ra.x - 0.5) < 1e-9 && abs((ra.w ?? 0) - 0.25) < 1e-9 && abs((ra.h ?? 0) - 0.25) < 1e-9,

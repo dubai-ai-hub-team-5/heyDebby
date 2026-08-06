@@ -38,76 +38,35 @@ func mapToScreen(_ a: Annotation, container: CGRect?) -> Annotation {
                       label: a.label)
 }
 
-/// Finds `MARKER: [ … ]` anywhere in `text` and returns the JSON array plus the span to cut.
-///
-/// Deliberately not line-based: Gemini pretty-prints its JSON across several lines and likes
-/// to wrap it in ``` fences or **bold**, none of which a `hasPrefix("DRAWINGS:")` check survives.
-/// Brackets are matched by depth, skipping anything inside a JSON string (labels may contain `[`).
-private func extractBlock(_ marker: String, from text: String) -> (json: String, range: Range<String.Index>)? {
-    guard let m = text.range(of: marker, options: .caseInsensitive),
-          let open = text[m.upperBound...].firstIndex(of: "[") else { return nil }
-    var depth = 0, inString = false, escaped = false
-    var i = open
-    while i < text.endIndex {
-        let c = text[i]
-        if escaped {
-            escaped = false
-        } else if c == "\\" && inString {
-            escaped = true
-        } else if c == "\"" {
-            inString.toggle()
-        } else if !inString {
-            if c == "[" {
-                depth += 1
-            } else if c == "]" {
-                depth -= 1
-                if depth == 0 {
-                    let close = text.index(after: i)
-                    return (String(text[open..<close]), m.lowerBound..<close)
-                }
-            }
-        }
-        i = text.index(after: i)
-    }
-    return nil  // unterminated: a truncated reply, not something to half-parse
-}
-
 /// A model reply split into its parts. A struct, not a tuple: this has grown twice and each
 /// time every `let (a, b) =` call site broke at compile time for no good reason.
 struct ParsedReply {
-    var text = ""                     // what gets shown and spoken
-    var annotations: [Annotation] = []
-    var drawings: [ShapeSpec] = []
-    var more = false                  // the model says this lesson has another step
+    var beats: [Beat] = []
+    var text = ""      // what gets shown in the notch: every spoken sentence, joined
+    var more = false   // the model says this lesson has another step
 }
 
-/// Splits a model reply, stripping the ANNOTATIONS:, DRAWINGS: and MORE: markers regardless
-/// of order.
-func parseReply(_ text: String) -> ParsedReply {
-    var out = ParsedReply()
-    var clean = text
+extension ParsedReply {
+    /// Views over the beats, for callers that only want one kind. Order within each
+    /// kind is preserved; the interleaving is in `beats`.
+    var annotations: [Annotation] {
+        beats.compactMap { if case .point(let a) = $0 { return a } else { return nil } }
+    }
+    var drawings: [ShapeSpec] {
+        beats.compactMap { if case .draw(let s) = $0 { return s } else { return nil } }
+    }
+}
 
-    if let b = extractBlock("DRAWINGS:", from: clean) {
-        out.drawings = (try? JSONDecoder().decode([ShapeSpec].self, from: Data(b.json.utf8))) ?? []
-        clean.removeSubrange(b.range)
-    }
-    if let b = extractBlock("ANNOTATIONS:", from: clean) {
-        out.annotations = (try? JSONDecoder().decode([Annotation].self, from: Data(b.json.utf8))) ?? []
-        clean.removeSubrange(b.range)
-    }
-    // MORE: is a bare marker, not JSON — the model writes it when a lesson has another step.
-    if let m = clean.range(of: "MORE:", options: .caseInsensitive) {
-        let rest = clean[m.upperBound...]
-        let line = rest.prefix(while: { !$0.isNewline })
-        out.more = line.lowercased().contains("yes")
-        clean.removeSubrange(m.lowerBound..<(clean.index(m.upperBound, offsetBy: line.count)))
-    }
-    // Fences and bold markers left behind by the cut — and by prose generally. The clean
-    // text is spoken aloud, where "**" is noise.
-    for junk in ["```json", "```", "**"] {
-        clean = clean.replacingOccurrences(of: junk, with: "")
-    }
-    out.text = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+/// Splits a whole (non-streamed) reply. A complete reply is just a stream that arrived at
+/// once, so it goes through the same splitter — one format, one parser.
+func parseReply(_ text: String) -> ParsedReply {
+    var sp = BeatSplitter()
+    var out = ParsedReply()
+    out.beats = sp.feed(text) + sp.finish()
+    out.more = sp.more
+    out.text = out.beats
+        .compactMap { if case .say(let s) = $0 { return s } else { return nil } }
+        .joined(separator: " ")
     return out
 }
 
@@ -150,17 +109,25 @@ enum Claude {
     verify what happened (gently correct them if they're off track), then point at the next action, \
     until the task is done. Give exactly ONE annotation per step.
 
-    To point at a spot or mark a whole area, add a line:
-    ANNOTATIONS: [{"x":0.42,"y":0.18,"label":"File menu"}, {"x":0.1,"y":0.2,"w":0.3,"h":0.15,"label":"Toolbar"}]
+    To point at a spot or mark a whole area, put a line of its own:
+    POINT: {"x":0.42,"y":0.18,"label":"File menu"}
     An entry with only x,y points at a single spot. An entry with w,h marks a whole area whose \
     top-left corner is (x,y). All values are fractions of the screenshot's width/height, top-left origin. \
     Use an area for regions; use a point when the user should click. Omit when nothing to mark.
 
     You CAN draw on the user's screen — shapes AND text — and you do it yourself. NEVER say you \
     cannot draw, never say "picture this" or "imagine", and never ask the user to draw. If a visual \
-    helps, draw it. To draw, add a line:
-    DRAWINGS: [{"tool":"line","points":[{"x":0.3,"y":0.7},{"x":0.3,"y":0.35}],"color":"orange","lineWidth":4},{"tool":"text","points":[{"x":0.27,"y":0.52}],"label":"a","color":"orange"}]
-    Tools: line, arrow, triangle, polygon, rectangle, circle, curve, text.
+    helps, draw it. Each shape is one line of its own:
+    DRAW: {"tool":"line","points":[{"x":0.3,"y":0.7},{"x":0.3,"y":0.35}],"color":"orange","lineWidth":4}
+    DRAW: {"tool":"text","points":[{"x":0.27,"y":0.52}],"label":"a","color":"orange"}
+
+    PUT EACH DRAW LINE DIRECTLY AFTER THE SENTENCE THAT DESCRIBES IT. Your words and your \
+    drawing are played back in the order you write them: the sentence is spoken, then the shape \
+    appears, then the next sentence. Never collect the shapes at the end — that draws the whole \
+    picture before you have said anything about it. One shape per line, never an array, never \
+    inside ``` fences.
+
+    Tools: line, arrow, triangle, polygon, square, rectangle, circle, curve, text.
     - text writes label at its single point — use it for every side name, length, angle and formula.
     - triangle takes 3 points for real vertices (use this for right triangles), or 2 for a \
     bounding box. rectangle/circle take 2. line/arrow take start+end. curve takes many.
@@ -170,7 +137,7 @@ enum Claude {
     never float in empty space.
     - polygon closes a shape through ALL its points — for any other shape that isn't axis-aligned.
     Points are [0,1] fractions of the screenshot's width/height, top-left origin — same space as \
-    ANNOTATIONS, and both can appear in one reply. Colors: orange, white, red, blue, green, yellow. \
+    POINT, and both can appear in one reply. Colors: orange, white, red, blue, green, yellow. \
     lineWidth defaults to 3.
 
     Teaching by drawing: when the user asks you to explain, teach or show something visually, \
@@ -180,7 +147,7 @@ enum Claude {
     the text tool; a shape with no labels teaches nothing.
 
     Everything you have already drawn is STILL ON SCREEN, even though the screenshot never shows \
-    it — the screenshot is the user's own screen, without your drawings. Your earlier DRAWINGS \
+    it — the screenshot is the user's own screen, without your drawings. Your earlier DRAW \
     lines are in this conversation: read the coordinates back from them. Emit only the NEW shapes \
     each turn and never repeat a shape you already drew, or it will be drawn twice. Reuse the exact \
     coordinates from your earlier lines so new pieces meet the old ones — if the base ran to \
