@@ -183,7 +183,7 @@ enum Claude {
             for h in history.suffix(6) {
                 prompt += (h.role == "user" ? "Me: " : "You: ") + h.text + "\n"
             }
-            if let p = imagePath {
+            if let p = imagePath, !p.isEmpty {
                 prompt += "\nA screenshot of my screen right now is at \(p) — read that image first.\n"
             }
             prompt += "\nMe: " + userText
@@ -202,13 +202,14 @@ enum Claude {
     static func send(apiKey: String, model: String, history: [(role: String, text: String)],
                      userText: String, imageB64: String) async throws -> String {
         var messages: [[String: Any]] = history.map { ["role": $0.role, "content": $0.text] }
-        messages.append([
-            "role": "user",
-            "content": [
-                ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": imageB64]],
-                ["type": "text", "text": userText],
-            ],
-        ])
+        // An empty base64 data field is a hard 400 (same failure mode as Gemini's inlineData
+        // and OpenAI's input_image) — omit the image block entirely when there's no shot.
+        var userContent: [[String: Any]] = []
+        if !imageB64.isEmpty {
+            userContent.append(["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": imageB64]])
+        }
+        userContent.append(["type": "text", "text": userText])
+        messages.append(["role": "user", "content": userContent])
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 1024,

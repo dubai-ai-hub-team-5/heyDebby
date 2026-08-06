@@ -351,11 +351,11 @@ final class AppState: ObservableObject {
         if let task = agentTask(from: text) {
             runAgent(task)
         } else {
-            talk(text)
+            talk(text, withShot: !auto)
         }
     }
 
-    private func talk(_ text: String) {
+    private func talk(_ text: String, withShot: Bool = true) {
         // `backend` re-reads UserDefaults on every access and @AppStorage writes land at once,
         // so switching the Brain picker mid-request would otherwise change the answer between
         // the switch below and the playback guard — replaying a streamed lesson, or dropping a
@@ -384,8 +384,12 @@ final class AppState: ObservableObject {
         debbyScreenAspect = screen.frame.width / max(1, screen.frame.height)
         Task {
             do {
-                let shot = try await Capture.screen(excludingSelf: true, cropTo: snapContainer,
-                                                    displayID: screen.displayID)
+                // An auto-advance step changes nothing on screen except our own drawing,
+                // and the screenshot excludes our windows — so there is nothing new to see.
+                let shot = withShot
+                    ? try await Capture.screen(excludingSelf: true, cropTo: snapContainer,
+                                               displayID: screen.displayID)
+                    : Capture.Shot(base64: "", filePath: "")
                 let reply: String
                 switch brain {
                 case "codex":
