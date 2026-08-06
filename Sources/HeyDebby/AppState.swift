@@ -644,7 +644,8 @@ final class AppState: ObservableObject {
             let shotPath = (try? await Capture.screen(excludingSelf: true, displayID: displayID))?.filePath
             var procRef: Process?
             procRef = AgentRunner.run(
-                backend: agentBackend, task: task, screenshotPath: shotPath, fullAccess: agentFullAccess,
+                backend: agentBackend, task: task, screenshotPath: shotPath,
+                fullAccess: agentFullAccess, appControl: appControl,
                 onOutput: { [weak self] chunk in Task { @MainActor in self?.agentTick(chunk) } },
                 onDone: { [weak self] code in Task { @MainActor in
                     guard let self else { return }

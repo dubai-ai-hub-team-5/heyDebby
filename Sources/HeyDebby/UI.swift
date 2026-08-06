@@ -850,8 +850,9 @@ struct SettingsView: View {
             }
             Toggle("Agents: full access (skips sandbox/permissions — risky)", isOn: $agentFullAccess)
             Toggle("Let Debby control apps (volume, Spotify, menus)", isOn: $appControl)
-            Text("Debby runs short AppleScript commands. macOS will ask permission the first "
-                 + "time she touches each app, in Privacy & Security → Automation.")
+            Text("Debby runs short AppleScript commands. macOS asks permission the first "
+                 + "time she talks to a named app, in Privacy & Security → Automation — "
+                 + "some commands, like volume, don't go through that gate at all.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(width: 260, alignment: .leading)
             Text("Once you allow an app, Debby can control it fully, not just the one thing "

@@ -7,6 +7,12 @@ import Foundation
 /// Here the statement is an argument to `/usr/bin/osascript` and can only ever be
 /// AppleScript.
 enum Control {
+    /// The executable statements are run through — never a shell. This is the branch's
+    /// headline security property (argv, not a shell string), so it is a `static let`
+    /// rather than inlined in `run`, and a test pins it: swapping this to `/bin/zsh` with
+    /// a joined command string would pass every `arguments` assertion but reopen the hole.
+    static let executablePath = "/usr/bin/osascript"
+
     /// The argv osascript gets: one `-e` per statement, in order.
     static func arguments(for statements: [String]) -> [String] {
         statements.flatMap { ["-e", $0] }
@@ -23,7 +29,7 @@ enum Control {
             return DispatchQueue.main.async { onDone(0, "") }
         }
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.executableURL = URL(fileURLWithPath: executablePath)
         proc.arguments = arguments(for: statements)
         let pipe = Pipe()
         proc.standardOutput = pipe

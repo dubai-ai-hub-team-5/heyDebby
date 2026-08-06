@@ -129,21 +129,29 @@ struct BeatSplitter {
         "Terminal", "iTerm", "Script Editor",
     ]
 
-    /// AppleScript's routes to running arbitrary code. This is a denylist, and it is
-    /// honest about being one.
+    /// AppleScript's routes to running arbitrary code. This is a denylist over a language
+    /// neither of us fully enumerates, and it is honest about being one.
     ///
-    /// It holds for AppleScript's eval primitives: a keyword must appear literally in the
-    /// source to execute, so `do shell script` cannot be assembled from concatenated
-    /// strings without first calling `run script` or `load script` — and those are on the
-    /// list. Whitespace is normalised because AppleScript is whitespace-insensitive
-    /// between tokens.
+    /// It refuses the known named routes to a shell and to AppleScript's own eval — `do
+    /// shell script`, `run script`, `load script`, and naming a terminal emulator — plus
+    /// the raw four-char event codes below, which reach the same places without any of
+    /// those words. It has been defeated three times (whitespace-insensitivity, `run
+    /// script` concatenation, raw event codes) and hardened three times. It is a speed
+    /// bump, not a boundary — nothing here proves the list is complete.
+    ///
+    /// The real containment is elsewhere: execution is `osascript` argv, never a shell
+    /// string (see Control.swift), and the feature this gates is off by default.
     ///
     /// It does NOT hold for GUI scripting. `tell application "System Events" to keystroke`
     /// is deliberately allowed — it is how non-scriptable apps are reached — and keystrokes
     /// can open Spotlight and type into a terminal without naming one. This rail blocks
-    /// direct shell-out and eval. It is not a boundary against a model that has been
+    /// known shell-out and eval routes. It is not a boundary against a model that has been
     /// induced by on-screen content to type a command.
     private static func shellsOut(_ s: String) -> Bool {
+        // Raw four-char event codes — `«event sysoexec» "…"` — reach the same places the
+        // named commands do while containing none of their words. Any use of the raw-code
+        // syntax at all is refused; nothing a user asks for needs it.
+        if s.contains("«") || s.contains("»") { return true }
         let flat = s.uppercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         return refusedForms.contains { flat.contains($0.uppercased()) }
     }

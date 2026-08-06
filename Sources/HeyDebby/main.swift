@@ -138,8 +138,12 @@ func runSelfCheck() {
     // Known and accepted: GUI scripting is allowed, so RUN: is not a boundary against a
     // determined injection. This asserts the limit deliberately — if it ever starts
     // failing, someone tightened the rail and the settings copy needs to change with it.
-    assert(splitWhole("RUN: tell application \"System Events\" to keystroke \"t\" using command down")
-           .count == 1, "keystroke injection is knowingly allowed; see shellsOut's comment")
+    // Asserting the exact beat (not just a count of 1) matters: deleting the whole RUN:
+    // branch also yields exactly one beat — a .say of the fallen-through prose line —
+    // so a bare `.count == 1` would stay green even with the branch gone.
+    let keystroke = splitWhole("RUN: tell application \"System Events\" to keystroke \"t\" using command down")
+    assert(keystroke == [.run("tell application \"System Events\" to keystroke \"t\" using command down")],
+           "keystroke injection is knowingly allowed; see shellsOut's comment")
 
     // The bypasses that are NOT accepted.
     assert(splitWhole("RUN: tell application id \"com.apple.Terminal\" to activate") == [],
@@ -147,7 +151,24 @@ func runSelfCheck() {
     assert(splitWhole("RUN: tell application \"Terminal.app\" to activate") == [],
            "a terminal named with a .app suffix must still be refused")
 
+    // Raw four-char event codes contain none of the denylisted keywords and reach the
+    // same places `do shell script` does — demonstrated live with
+    // `osascript -e '«event sysoexec» "id -un"'`. Any use of the raw-code syntax is refused.
+    assert(splitWhole("RUN: «event sysoexec» \"touch /tmp/pwned; id -un\"") == [],
+           "raw four-char event codes must be refused — they carry no denylisted keyword")
+    assert(splitWhole("RUN: tell application id \"«event sysoexec»\" to activate") == [],
+           "a guillemet anywhere in the payload is refused, not just at the start")
+    // An ordinary payload with neither guillemet must be unaffected by the new check.
+    assert(splitWhole("RUN: tell application \"Spotify\" to playpause")
+           == [.run("tell application \"Spotify\" to playpause")],
+           "a payload containing neither guillemet must still pass")
+
     // --- Control: argv, not a shell string ---
+    // The executable is the branch's headline security property: swapping it for
+    // /bin/zsh with a joined command string would keep every `arguments` assertion below
+    // green while reopening the exact hole AgentRunner.spawn's zsh -lc path has.
+    assert(Control.executablePath == "/usr/bin/osascript",
+           "statements must run through osascript, never a shell")
     assert(Control.arguments(for: ["set volume output volume 60"])
            == ["-e", "set volume output volume 60"], "one statement, one -e pair")
     assert(Control.arguments(for: ["a", "b"]) == ["-e", "a", "-e", "b"],
@@ -317,31 +338,38 @@ func runSelfCheck() {
     assert(agentTask(from: "what does this button do") == nil)
     assert(agentTask(from: "agents are cool right") == nil)
     assert(shellQuote("it's") == "'it'\\''s'")
-    let cx = agentCommand(backend: "codex", task: "hi", screenshotPath: "/tmp/s.jpg", fullAccess: false)
+    let cx = agentCommand(backend: "codex", task: "hi", screenshotPath: "/tmp/s.jpg", fullAccess: false, appControl: true)
     assert(cx.contains("codex exec --skip-git-repo-check") && cx.contains("-i '/tmp/s.jpg'")
            && cx.contains("-s read-only") && cx.hasSuffix("'hi'"), "codex cmd wrong: \(cx)")
-    assert(agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: true)
+    assert(agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: true, appControl: true)
         .contains("--dangerously-bypass-approvals-and-sandbox"))
-    assert(agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: true)
+    assert(agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: true, appControl: false)
         .contains("claude -p --dangerously-skip-permissions"))
     // Without an allowlist `claude -p` denies every tool, so app tasks fail silently.
     // The prompt must come before --allowedTools, which is variadic and eats what follows.
-    let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false)
+    let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false, appControl: true)
     assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep Bash(osascript:*)"),
            "claude agent needs tools: \(cl)")
     assert(cl.range(of: "'email bob'")!.upperBound <= cl.range(of: "--allowedTools")!.lowerBound,
            "prompt must precede the variadic flag: \(cl)")
 
-    // Agents get scoped shell for AppleScript — not bare Bash.
+    // Agents get scoped shell for AppleScript — not bare Bash — and ONLY when the user has
+    // switched app control on. An agent's osascript call runs raw, never through
+    // BeatSplitter's refusal list, so this grant must not be a second, ungated door into
+    // the same capability the RUN: rail exists to gate.
     let ag = agentCommand(backend: "claude", task: "play some music",
-                          screenshotPath: nil, fullAccess: false)
+                          screenshotPath: nil, fullAccess: false, appControl: true)
     assert(ag.contains("Bash(osascript:*)"),
-           "the claude agent needs scoped osascript for app tasks: \(ag)")
+           "app control on: the claude agent needs scoped osascript for app tasks: \(ag)")
     assert(ag.range(of: "'play some music'")!.upperBound
            <= ag.range(of: "--allowedTools")!.lowerBound,
            "--allowedTools is variadic and must stay last")
+    let agOff = agentCommand(backend: "claude", task: "play some music",
+                             screenshotPath: nil, fullAccess: false, appControl: false)
+    assert(!agOff.contains("osascript"),
+           "app control off: the agent grant must not include osascript either: \(agOff)")
     // Full access already implies everything; the scoped entry would be noise.
-    assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false)
+    assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false, appControl: true)
             .contains("osascript"), "codex agents are unaffected")
 
     // The marker is documented only when the feature is on. A model told about a marker

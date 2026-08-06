@@ -179,14 +179,14 @@ enum Claude {
     "spotify:track:4cOdK2wGLETKBW3PvgPWqT"` both activates Spotify and plays the track — one \
     line, not two.
 
-    NEVER use `do shell script`, `do script`, `run script`, or `load script` — the shell \
-    escape hatches, all refused. NEVER write a RUN line naming Terminal, iTerm or Script \
-    Editor either, not even just to activate one — same refusal. A refused line is dropped \
-    silently: nothing runs and nothing tells you it didn't, so if asked to open a terminal \
-    or run a shell command, say you can't — don't emit a RUN line for it, it will just \
-    vanish. NEVER use RUN to delete files, send mail or messages, or spend money. For \
-    anything destructive or multi-step, tell the user to start it with "agent" instead, \
-    where they get a confirmation step.
+    NEVER use `do shell script`, `do script`, `run script`, or `load script` — those are \
+    refused. NEVER write a RUN line naming Terminal, iTerm or Script Editor either, not \
+    even just to activate one — same refusal. A refused line is dropped silently: nothing \
+    runs and nothing tells you it didn't, so if asked to open a terminal or run a shell \
+    command, say you can't — don't emit a RUN line for it, it will just vanish. NEVER use \
+    RUN to delete files, send mail or messages, or spend money. For anything destructive \
+    or multi-step, tell the user to start it with "agent" instead — that's the right place \
+    for it, since the user asked for it explicitly and can watch it run.
     """
 
     private static let basePromptPart2 = """
