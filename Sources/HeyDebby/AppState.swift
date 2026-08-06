@@ -16,12 +16,13 @@ func agentTask(from text: String) -> String? {
 }
 
 /// "codex" (ChatGPT plan via the Codex CLI), "claudecli" (Claude plan via the claude
-/// CLI), "claude" (Anthropic API key), or "gemini" (Google AI API key). Anything else
-/// means Auto: prefer whichever subscription is already signed in.
+/// CLI), "claude" (Anthropic API key), "gemini" (Google AI API key), or "openai"
+/// (OpenAI API key, the only streamed one). Anything else means Auto: prefer whichever
+/// subscription is already signed in.
 func resolveBackend(_ stored: String,
                     codex: Bool = Codex.isLoggedIn,
                     claudeCLI: Bool = Claude.CLI.isLoggedIn) -> String {
-    if ["codex", "claude", "claudecli", "gemini"].contains(stored) { return stored }
+    if ["codex", "claude", "claudecli", "gemini", "openai"].contains(stored) { return stored }
     if codex { return "codex" }
     if claudeCLI { return "claudecli" }
     return "claude"
@@ -133,6 +134,14 @@ final class AppState: ObservableObject {
     var geminiModel: String {
         let m = UserDefaults.standard.string(forKey: "geminiModel") ?? ""
         return m.isEmpty ? Gemini.defaultModel : m
+    }
+    var openaiApiKey: String {
+        let stored = UserDefaults.standard.string(forKey: "openaiApiKey") ?? ""
+        return stored.isEmpty ? (ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? "") : stored
+    }
+    var openaiModel: String {
+        let m = UserDefaults.standard.string(forKey: "openaiModel") ?? ""
+        return m.isEmpty ? OpenAI.defaultModel : m
     }
 
     // MARK: - Notch
@@ -352,6 +361,10 @@ final class AppState: ObservableObject {
             show("I need a Google AI API key — open ⚙︎ in the notch and paste one (or set GOOGLE_API_KEY).")
             return
         }
+        if backend == "openai" && openaiApiKey.isEmpty {
+            show("I need an OpenAI API key — open ⚙︎ in the notch and paste one (or set OPENAI_API_KEY).")
+            return
+        }
         isThinking = true
         let gen = chatGeneration
         // Snapshot: the same container/screen must be used for crop AND mapping,
@@ -375,6 +388,14 @@ final class AppState: ObservableObject {
                 case "gemini":
                     reply = try await Gemini.send(apiKey: geminiApiKey, model: geminiModel,
                                                    history: history, userText: text, imageB64: shot.base64)
+                case "openai":
+                    // Streamed: beats reach the player as they arrive, so Debby starts
+                    // speaking at the first finished sentence instead of the last token.
+                    // The lesson has already played by the time this returns; only the
+                    // raw text comes back, for history.
+                    reply = try await streamLesson(gen: gen, container: snapContainer,
+                                                   screen: screen, text: text,
+                                                   imageB64: shot.base64)
                 default:
                     reply = try await Claude.send(apiKey: apiKey, model: model, history: history,
                                                   userText: text, imageB64: shot.base64)
@@ -382,30 +403,34 @@ final class AppState: ObservableObject {
                 // The HTTP backends logged nothing at all, so "it didn't draw" was undebuggable:
                 // no reply, no parse result, no way to tell a refusal from a dropped DRAWINGS line.
                 DebbyLog.write("CHAT \(backend) reply:\n\(reply)")
-                let parsed = parseReply(reply)
-                let (clean, anns, drawings) = (parsed.text, parsed.annotations, parsed.drawings)
-                DebbyLog.write("PARSED annotations=\(anns.count) drawings=\(drawings.count) more=\(parsed.more)")
                 guard gen == chatGeneration else { return }  // user hit New / ✕ meanwhile
                 isThinking = false
                 history.append((role: "user", text: text))
                 // Keep the DRAWINGS block in history, not the spoken text alone. The screenshot
                 // excludes our own windows, so the canvas is invisible to the model next turn —
                 // these coordinates are the ONLY record of what it already drew, and without
-                // them step 2 of a diagram can't meet step 1.
+                // them step 2 of a diagram can't meet step 1. Streamed or not, it's the raw text.
                 history.append((role: "assistant", text: reply))
                 if history.count > 20 { history.removeFirst(history.count - 20) }
-                show(clean)
-                // Snapshot once: voiceReplies can change mid-lesson, and a player built for
-                // speech must not have onSay start reading a live flag that later says "off"
-                // with no callback ever coming to un-stick it.
-                let speechOn = voiceReplies
-                let player = LessonPlayer(speechEnabled: speechOn)
-                lessonPlayer = player
-                if !parsed.annotations.isEmpty { overlay.showEmpty(on: screen) }
-                attach(player, gen: gen, container: snapContainer, screen: screen,
-                       speechOn: speechOn, more: { parsed.more })
-                player.append(parsed.beats)
-                player.closeStream()
+                // The streamed brain already played this lesson while it arrived; parsing and
+                // playing it a second time here would say every sentence twice.
+                if backend != "openai" {
+                    let parsed = parseReply(reply)
+                    let (clean, anns, drawings) = (parsed.text, parsed.annotations, parsed.drawings)
+                    DebbyLog.write("PARSED annotations=\(anns.count) drawings=\(drawings.count) more=\(parsed.more)")
+                    show(clean)
+                    // Snapshot once: voiceReplies can change mid-lesson, and a player built for
+                    // speech must not have onSay start reading a live flag that later says "off"
+                    // with no callback ever coming to un-stick it.
+                    let speechOn = voiceReplies
+                    let player = LessonPlayer(speechEnabled: speechOn)
+                    lessonPlayer = player
+                    if !parsed.annotations.isEmpty { overlay.showEmpty(on: screen) }
+                    attach(player, gen: gen, container: snapContainer, screen: screen,
+                           speechOn: speechOn, more: { parsed.more })
+                    player.append(parsed.beats)
+                    player.closeStream()
+                }
             } catch {
                 guard gen == chatGeneration else { return }
                 isThinking = false
@@ -413,6 +438,61 @@ final class AppState: ObservableObject {
                 show("⚠️ \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Streams a reply straight into a player, returning the raw text for history.
+    /// The splitter is a local `var` captured by the delta closure — legal, and simpler
+    /// than threading it back out through an `inout` parameter.
+    private func streamLesson(gen: Int, container: CGRect?, screen: NSScreen,
+                              text: String, imageB64: String) async throws -> String {
+        // Same snapshot the whole-reply path takes, for the same reason: onSay must never
+        // read a live voiceReplies that can flip to "off" mid-lesson and leave the player
+        // waiting for a speech callback that will never come.
+        let speechOn = voiceReplies
+        let player = LessonPlayer(speechEnabled: speechOn)
+        lessonPlayer = player
+        var sp = BeatSplitter()
+        // `more` reads the splitter from onIdle, which cannot fire before closeStream()
+        // below — so by the time it runs, the last feed() is long finished.
+        attach(player, gen: gen, container: container, screen: screen,
+               speechOn: speechOn, more: { sp.more })
+        // No parsed `clean` text exists up front, so the notch follows the narration instead
+        // of preceding it. Wrapping is how the one and only voice.speak call site stays
+        // inside attach. Accumulating rather than replacing because the notch hides `reply`
+        // while she's speaking: replaced, the answer left behind afterwards — and the whole
+        // answer with voiceReplies off — would be its last sentence alone.
+        let base = player.onSay
+        var spoken = ""
+        player.onSay = { [weak self] s in
+            guard let self, self.chatGeneration == gen else { return }
+            spoken += spoken.isEmpty ? s : " " + s
+            self.show(spoken)
+            base?(s)
+        }
+
+        var raw = ""
+        try await OpenAI.stream(apiKey: openaiApiKey, model: openaiModel, history: history,
+                                userText: text, imageB64: imageB64) { [weak self] chunk in
+            raw += chunk
+            let beats = sp.feed(chunk)
+            guard !beats.isEmpty else { return }
+            // onDelta lands on a URLSession queue; the player and every @Published flag are
+            // main-only. DispatchQueue.main, not Task {}, because the hop has to preserve
+            // order — the main queue guarantees FIFO, unstructured tasks do not, and beats
+            // that arrive out of order are a shape drawn before the sentence that explains it.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.chatGeneration == gen else { return }
+                    self.isThinking = false  // she's already talking; stop saying "thinking"
+                    player.append(beats)
+                }
+            }
+        }
+        // Resumes on the main actor behind every hop above — same queue, still in order.
+        let tail = sp.finish()
+        if !tail.isEmpty { player.append(tail) }
+        player.closeStream()
+        return raw
     }
 
     /// Wires a player to the screen and the voice. `more` is a closure rather than a Bool
@@ -431,6 +511,10 @@ final class AppState: ObservableObject {
             let cx = m.x + (m.w ?? 0) / 2, cy = m.y + (m.h ?? 0) / 2
             self.pointer.highlight([CGPoint(x: f.minX + cx * f.width,
                                             y: f.minY + (1 - cy) * f.height)])
+            // The whole-reply path pre-opens the window because it counted the annotations
+            // first; a streamed one only finds out here, and addAnnotation alone paints
+            // into a window that was never shown.
+            if !self.overlay.isOpen { self.overlay.showEmpty(on: screen) }
             self.overlay.addAnnotation(m)
             self.showNext = true
             self.armClickWatch()

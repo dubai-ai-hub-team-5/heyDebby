@@ -265,6 +265,8 @@ func runSelfCheck() {
     assert(resolveBackend("", codex: false, claudeCLI: false) == "claude")
     assert(resolveBackend("claudecli", codex: true, claudeCLI: false) == "claudecli", "explicit choice wins")
     assert(resolveBackend("garbage", codex: false, claudeCLI: true) == "claudecli", "unknown value means Auto")
+    assert(resolveBackend("openai", codex: true, claudeCLI: true) == "openai",
+           "an explicitly chosen brain must win over auto-detection")
 
     assert(micLevel(rms: 0) == 0 && micLevel(rms: 1) == 1, "mic level must clamp to 0…1")
     assert(micLevel(rms: 0.03) > 0.25 && micLevel(rms: 0.03) < 0.6, "speaking voice should sit mid-scale")

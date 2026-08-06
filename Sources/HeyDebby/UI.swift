@@ -779,6 +779,8 @@ struct SettingsView: View {
     @AppStorage("codexModel") private var codexModel = ""
     @AppStorage("geminiApiKey") private var geminiApiKey = ""
     @AppStorage("geminiModel") private var geminiModel = ""
+    @AppStorage("openaiApiKey") private var openaiApiKey = ""
+    @AppStorage("openaiModel") private var openaiModel = ""
     @AppStorage("voiceReplies") private var voiceReplies = true
     @AppStorage("voiceId") private var voiceId = ""
     @AppStorage("agentFullAccess") private var agentFullAccess = false
@@ -807,6 +809,7 @@ struct SettingsView: View {
                 Text("Claude (Claude plan)").tag("claudecli")
                 Text("Claude API key").tag("claude")
                 Text("Gemini (Google AI)").tag("gemini")
+                Text("OpenAI (GPT-5.6)").tag("openai")
             }
             .frame(width: 260)
             if resolveBackend(backend) == "claude" {
@@ -826,6 +829,16 @@ struct SettingsView: View {
                     .frame(width: 260)
                 Text("Uses Google's Gemini with vision. Blank key falls back to GOOGLE_API_KEY "
                      + "or GEMINI_API_KEY. Get a key at aistudio.google.com.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
+            } else if resolveBackend(backend) == "openai" {
+                SecureField("OpenAI API key (sk-…)", text: $openaiApiKey)
+                    .frame(width: 260)
+                TextField("Model (blank = \(OpenAI.defaultModel))", text: $openaiModel)
+                    .frame(width: 260)
+                Text("Streams, so Debby starts talking in about a second and draws each shape "
+                     + "as she describes it. Blank key falls back to OPENAI_API_KEY. "
+                     + "gpt-5.6-terra and gpt-5.6-sol are stronger and slower.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)
             } else {
@@ -1163,6 +1176,10 @@ final class OverlayController: ObservableObject {
         openWindow(on: screen)
         scheduleAutoHide()
     }
+
+    /// A streamed lesson doesn't know it will point at anything until the POINT arrives,
+    /// so the caller checks this instead of opening an empty window on every reply.
+    var isOpen: Bool { window != nil }
 
     // Open the overlay with no annotations yet; call addAnnotation() to reveal progressively.
     func showEmpty(on screen: NSScreen) {
