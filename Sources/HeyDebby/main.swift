@@ -126,8 +126,8 @@ func runSelfCheck() {
     lp.onSay = { played.append("say:\($0)") }
     lp.onDraw = { played.append("draw:\($0.tool)") }
     lp.onPoint = { played.append("point:\($0.label)") }
-    var idle = false
-    lp.onIdle = { idle = true }
+    var idleCount = 0
+    lp.onIdle = { idleCount += 1 }
 
     let lineShape = ShapeSpec(tool: "line", points: [.init(x: 0, y: 0), .init(x: 1, y: 1)],
                               color: nil, lineWidth: nil, label: nil)
@@ -137,10 +137,38 @@ func runSelfCheck() {
     lp.speechFinished()
     assert(played == ["say:one", "draw:line", "say:two"],
            "the shape must land between its two sentences: \(played)")
-    assert(!idle, "still speaking — not idle yet")
+    assert(idleCount == 0, "still speaking — not idle yet")
     lp.speechFinished()
     lp.closeStream()
-    assert(idle, "queue drained and stream closed means idle")
+    assert(idleCount == 1, "queue drained and stream closed means idle")
+
+    // onIdle drives auto-advance: a second fire burns a lesson step and an API call.
+    lp.speechFinished()          // extra callback after the lesson already ended
+    lp.speechFinished()
+    assert(idleCount == 1, "onIdle must fire exactly once, got \(idleCount)")
+
+    // A cancel that arrives while nothing is speaking belongs to someone else.
+    let lp4 = LessonPlayer()
+    var played4: [String] = []
+    lp4.onSay = { played4.append("say:\($0)") }
+    lp4.onDraw = { played4.append("draw:\($0.tool)") }
+    lp4.speechFinished()         // stray callback before anything was queued
+    lp4.append([.say("a"), .draw(lineShape)])
+    assert(played4 == ["say:a"], "a stray speechFinished must not advance the queue: \(played4)")
+
+    // A cancelled lesson must go quiet and must never auto-advance.
+    let lp5 = LessonPlayer()
+    var played5: [String] = []
+    var idle5 = 0
+    lp5.onSay = { played5.append("say:\($0)") }
+    lp5.onDraw = { played5.append("draw:\($0.tool)") }
+    lp5.onIdle = { idle5 += 1 }
+    lp5.append([.say("one"), .draw(lineShape), .say("two")])
+    lp5.cancel()
+    lp5.speechFinished()
+    lp5.closeStream()
+    assert(played5 == ["say:one"], "cancel must stop playback: \(played5)")
+    assert(idle5 == 0, "a cancelled lesson must not auto-advance")
 
     // Beats arriving after playback has started still queue behind the current sentence.
     let lp2 = LessonPlayer()

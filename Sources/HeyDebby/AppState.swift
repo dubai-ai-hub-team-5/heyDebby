@@ -284,6 +284,8 @@ final class AppState: ObservableObject {
 
     func startListening() {
         voice.stop()
+        lessonPlayer?.cancel()
+        lessonPlayer = nil
         pendingAdvance?.cancel()  // talking over the lesson stops it advancing
         activeScreen = NSScreen.underMouse
         partial = ""
@@ -325,6 +327,7 @@ final class AppState: ObservableObject {
     }
 
     func submit(_ text: String, auto: Bool = false) {
+        chatGeneration += 1   // newest request wins; a stale reply must not install a player
         if isListening { _ = speech.stop(); isListening = false; partial = "" }
         voice.stop()
         lessonPlayer?.cancel()
@@ -392,11 +395,15 @@ final class AppState: ObservableObject {
                 history.append((role: "assistant", text: reply))
                 if history.count > 20 { history.removeFirst(history.count - 20) }
                 show(clean)
-                let player = LessonPlayer(speechEnabled: voiceReplies)
+                // Snapshot once: voiceReplies can change mid-lesson, and a player built for
+                // speech must not have onSay start reading a live flag that later says "off"
+                // with no callback ever coming to un-stick it.
+                let speechOn = voiceReplies
+                let player = LessonPlayer(speechEnabled: speechOn)
                 lessonPlayer = player
                 if !parsed.annotations.isEmpty { overlay.showEmpty(on: screen) }
                 attach(player, gen: gen, container: snapContainer, screen: screen,
-                       more: { parsed.more })
+                       speechOn: speechOn, more: { parsed.more })
                 player.append(parsed.beats)
                 player.closeStream()
             } catch {
@@ -412,10 +419,10 @@ final class AppState: ObservableObject {
     /// because a streamed reply only knows whether the lesson continues once the stream
     /// has closed — which is before `onIdle` fires, but after this is called.
     private func attach(_ player: LessonPlayer, gen: Int, container: CGRect?,
-                        screen: NSScreen, more: @escaping () -> Bool) {
+                        screen: NSScreen, speechOn: Bool, more: @escaping () -> Bool) {
         player.onSay = { [weak self] sentence in
             guard let self, self.chatGeneration == gen else { return }
-            if self.voiceReplies { self.voice.speak(sentence) }
+            if speechOn { self.voice.speak(sentence) }
         }
         player.onPoint = { [weak self] ann in
             guard let self, self.chatGeneration == gen else { return }
@@ -460,8 +467,14 @@ final class AppState: ObservableObject {
     /// everything else needs a start and an end.
     private func drawnShape(from spec: ShapeSpec, container: CGRect?,
                             screen: NSScreen) -> DrawnShape? {
-        guard let tool = DrawTool(rawValue: spec.tool) else { return nil }
-        guard spec.points.count >= (tool == .text ? 1 : 2) else { return nil }
+        guard let tool = DrawTool(rawValue: spec.tool) else {
+            DebbyLog.write("DRAW rejected: unknown tool \(spec.tool)")
+            return nil
+        }
+        guard spec.points.count >= (tool == .text ? 1 : 2) else {
+            DebbyLog.write("DRAW rejected: \(spec.tool) needs more points, got \(spec.points.count)")
+            return nil
+        }
         let pts = spec.points.map { pt -> CGPoint in
             let mapped = mapToScreen(Annotation(x: pt.x, y: pt.y, label: ""), container: container)
             return CGPoint(x: mapped.x * screen.frame.width, y: mapped.y * screen.frame.height)

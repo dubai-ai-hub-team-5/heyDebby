@@ -18,6 +18,7 @@ final class LessonPlayer {
     private var queue: [Beat] = []
     private var speaking = false
     private var streamOpen = true
+    private var idleFired = false
 
     /// With `voiceReplies` off nothing ever reports back, so nothing may wait.
     init(speechEnabled: Bool = true) {
@@ -35,8 +36,11 @@ final class LessonPlayer {
         pump()
     }
 
-    /// Called when the synthesiser finishes or cancels an utterance.
+    /// Called when the synthesiser finishes or cancels an utterance. A cancel that
+    /// arrives when we are not speaking is somebody else's — ignore it rather than
+    /// treating it as a completed sentence.
     func speechFinished() {
+        guard speaking else { return }
         speaking = false
         pump()
     }
@@ -45,6 +49,7 @@ final class LessonPlayer {
         queue.removeAll()
         speaking = false
         streamOpen = false
+        idleFired = true
     }
 
     private func pump() {
@@ -57,6 +62,9 @@ final class LessonPlayer {
                 onSay?(t)
             }
         }
-        if !speaking, queue.isEmpty, !streamOpen { onIdle?() }
+        if !speaking, queue.isEmpty, !streamOpen, !idleFired {
+            idleFired = true
+            onIdle?()
+        }
     }
 }
