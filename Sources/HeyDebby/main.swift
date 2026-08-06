@@ -303,6 +303,13 @@ func runSelfCheck() {
     assert(OpenAI.delta(fromSSELine:
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"[DONE]\",\"sequence_number\":2}") == "[DONE]",
         "a delta whose text is literally [DONE] must still come through")
+    // Other *.delta events carry a "delta" field too — only output_text is speech.
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking out loud\"}") == nil,
+        "a reasoning-summary delta must not reach the user's ears")
+    assert(OpenAI.delta(fromSSELine:
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"a\\\":1}\"}") == nil,
+        "a function-call-arguments delta is not speech")
 }
 
 if CommandLine.arguments.contains("--selfcheck") {

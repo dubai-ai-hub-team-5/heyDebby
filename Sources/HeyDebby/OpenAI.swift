@@ -29,7 +29,7 @@ enum OpenAI {
             // Assistant turns are output_text; user turns are input_text. Mixing them up
             // is a 400 that reads like a malformed request rather than a role problem.
             let type = h.role == "assistant" ? "output_text" : "input_text"
-            return ["role": h.role, "content": [["type": type, "text": h.text]]]
+            return ["type": "message", "role": h.role, "content": [["type": type, "text": h.text]]]
         }
         var content: [[String: Any]] = [["type": "input_text", "text": userText]]
         // An empty input_image is a hard 400 that reads like a broken key rather than a
@@ -38,7 +38,7 @@ enum OpenAI {
             content.insert(["type": "input_image",
                             "image_url": "data:image/jpeg;base64,\(imageB64)"], at: 0)
         }
-        input.append(["role": "user", "content": content])
+        input.append(["type": "message", "role": "user", "content": content])
 
         let body: [String: Any] = [
             "model": model.isEmpty ? defaultModel : model,
@@ -59,7 +59,10 @@ enum OpenAI {
             // The error body arrives down the same byte stream; without draining it the
             // failure is a bare status code and undiagnosable.
             var detail = ""
-            for try await line in bytes.lines { detail += line }
+            for try await line in bytes.lines {
+                detail += line
+                if detail.count > 2000 { break }
+            }
             throw openAIErr("OpenAI API error \(status): \(detail.isEmpty ? "no body" : detail)")
         }
         for try await line in bytes.lines {
