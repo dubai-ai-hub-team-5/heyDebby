@@ -2,6 +2,64 @@ import AppKit
 import SwiftUI
 
 func runSelfCheck() {
+    // --- BeatSplitter ---
+    let lesson = """
+    The hypotenuse is the long side. It faces the right angle.
+    DRAW: {"tool":"line","points":[{"x":0.3,"y":0.7},{"x":0.6,"y":0.4}],"color":"orange"}
+    Now the square that stands on it.
+    POINT: {"x":0.42,"y":0.18,"label":"File menu"}
+    MORE: yes
+    """
+    func splitWhole(_ s: String) -> [Beat] {
+        var sp = BeatSplitter()
+        var b = sp.feed(s)
+        b += sp.finish()
+        return b
+    }
+    let lb = splitWhole(lesson)
+    assert(lb.count == 5, "expected 4 sentences/markers + 1, got \(lb.count): \(lb)")
+    assert(lb[0] == .say("The hypotenuse is the long side."), "sentence 1 wrong: \(lb[0])")
+    assert(lb[1] == .say("It faces the right angle."), "sentence 2 wrong: \(lb[1])")
+    if case .draw(let s) = lb[2] {
+        assert(s.tool == "line" && s.points.count == 2 && abs(s.points[0].x - 0.3) < 1e-9,
+               "DRAW line did not decode: \(s)")
+    } else { assert(false, "beat 2 should be a draw, got \(lb[2])") }
+    assert(lb[3] == .say("Now the square that stands on it."), "sentence 3 wrong: \(lb[3])")
+    if case .point(let a) = lb[4] {
+        assert(a.label == "File menu" && abs(a.x - 0.42) < 1e-9, "POINT did not decode: \(a)")
+    } else { assert(false, "beat 4 should be a point, got \(lb[4])") }
+
+    // MORE: is a flag, not a beat, and is never spoken.
+    var moreSp = BeatSplitter()
+    _ = moreSp.feed(lesson)
+    _ = moreSp.finish()
+    assert(moreSp.more, "MORE: yes must set the flag")
+    assert(!splitWhole("All done — that's the theorem.").contains { $0 == .say("MORE: yes") },
+           "the MORE marker must never be spoken")
+
+    // The bug this parser would otherwise have: a chunk boundary anywhere must not
+    // change the output. SSE deltas split mid-word and mid-marker.
+    let chars = Array(lesson)
+    for cut in 1..<chars.count {
+        var sp = BeatSplitter()
+        var b = sp.feed(String(chars[..<cut]))
+        b += sp.feed(String(chars[cut...]))
+        b += sp.finish()
+        assert(b == lb, "split at \(cut) changed the beats:\n\(b)\nvs\n\(lb)")
+    }
+
+    // A decimal point is not a sentence end: no whitespace follows the dot.
+    assert(splitWhole("Pi is 3.14 exactly.") == [.say("Pi is 3.14 exactly.")],
+           "3.14 must not split: \(splitWhole("Pi is 3.14 exactly."))")
+
+    // One malformed shape must not kill the lesson around it.
+    let bad = splitWhole("First.\nDRAW: {not json}\nSecond.")
+    assert(bad == [.say("First."), .say("Second.")], "a bad DRAW line must be dropped alone: \(bad)")
+
+    // Models wrap things in fences and bullets; those lines carry no content.
+    let fenced = splitWhole("Look.\n```json\nDRAW: {\"tool\":\"circle\",\"points\":[{\"x\":0.1,\"y\":0.1},{\"x\":0.2,\"y\":0.2}]}\n```\nDone.")
+    assert(fenced.count == 3, "fences must be ignored, not spoken: \(fenced)")
+
     let r1 = parseReply("Click the File menu.\nANNOTATIONS: [{\"x\":0.1,\"y\":0.2,\"label\":\"File\"}]")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
     assert(r1.annotations.count == 1 && r1.annotations[0].label == "File" && abs(r1.annotations[0].x - 0.1) < 0.0001, "annotation parse wrong")

@@ -2,7 +2,7 @@ import Foundation
 
 /// A point marker (x,y) or, when w/h are present, a marked area with top-left (x,y).
 /// All values are normalized top-left-origin fractions of the screenshot.
-struct Annotation: Codable {
+struct Annotation: Codable, Equatable {
     let x: Double
     let y: Double
     var w: Double?
@@ -20,8 +20,8 @@ struct Annotation: Codable {
 
 /// A shape the AI wants drawn on the canvas. Coordinates are normalized [0,1] fractions
 /// of the screenshot (same space as Annotation), mapped to screen pixels before rendering.
-struct ShapeSpec: Codable {
-    struct Point: Codable { let x: Double; let y: Double }
+struct ShapeSpec: Codable, Equatable {
+    struct Point: Codable, Equatable { let x: Double; let y: Double }
     let tool: String       // matches DrawTool.rawValue: arrow, line, triangle, rectangle, circle, curve, text
     let points: [Point]    // 1 point for text; 2 for most tools; 3+ for polygons/curves
     var color: String?     // orange (default), red, blue, green, yellow, white
