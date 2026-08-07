@@ -378,7 +378,7 @@ func runSelfCheck() {
     // Without an allowlist `claude -p` denies every tool, so app tasks fail silently.
     // The prompt must come before --allowedTools, which is variadic and eats what follows.
     let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false, appControl: true)
-    assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep Bash(osascript:*)"),
+    assert(cl.hasSuffix("--allowedTools mcp__composio mcp__playwright Read Glob Grep Bash(osascript:*)"),
            "claude agent needs tools: \(cl)")
     assert(cl.range(of: "'email bob'")!.upperBound <= cl.range(of: "--allowedTools")!.lowerBound,
            "prompt must precede the variadic flag: \(cl)")
@@ -442,6 +442,23 @@ func runSelfCheck() {
                                 session: uuid, resume: true)
     assert(gateFull.contains("-r \(shellQuote(uuid))"), "full access still resumes the same session: \(gateFull)")
     assert(!gateFull.contains("--session-id"), "resume must not also pin a fresh session: \(gateFull)")
+
+    // --- browser control: the Playwright gateway + browserNote ---
+    // Browser tasks need the playwright gateway; the allowlist stays last.
+    let br = agentCommand(backend: "claude", task: "book a slot", screenshotPath: nil,
+                          fullAccess: false, session: "S1")
+    assert(br.contains("mcp__playwright"), "the browser gateway must be allowed: \(br)")
+    // Do not assert on the last token — the app-control plan appends to this list.
+    assert(br.range(of: "--allowedTools")!.lowerBound
+           > br.range(of: "'book a slot'")!.lowerBound,
+           "--allowedTools is variadic and must stay after the prompt")
+    // The note must forbid the three things Debby must never do, in words the model reads.
+    assert(browserNote.contains("NEED:"), "the note must define the gate marker")
+    assert(browserNote.lowercased().contains("captcha"), "the note must forbid CAPTCHAs")
+    assert(browserNote.contains(Profile.url.path),
+           "the note carries the profile PATH, never its contents — argv is world-readable")
+    assert(!browserNote.contains("passport") && !browserNote.contains("K1234567"),
+           "the note must never carry an example of an actual profile value")
 
     // The marker is documented only when the feature is on. A model told about a marker
     // the app will drop announces actions that never happen.

@@ -144,6 +144,7 @@ final class AppState: ObservableObject {
     }
     var agentFullAccess: Bool { UserDefaults.standard.bool(forKey: "agentFullAccess") }
     var appControl: Bool { UserDefaults.standard.bool(forKey: "appControl") }
+    var browserControl: Bool { UserDefaults.standard.bool(forKey: "browserControl") }
     var backend: String { resolveBackend(UserDefaults.standard.string(forKey: "backend") ?? "") }
     var docsFolder: String { UserDefaults.standard.string(forKey: "docsFolder") ?? "" }
 
@@ -695,7 +696,7 @@ final class AppState: ObservableObject {
             procRef = AgentRunner.run(
                 backend: agentBackend, task: task, screenshotPath: shotPath,
                 fullAccess: agentFullAccess, appControl: appControl,
-                session: session, resume: resumeSession != nil,
+                session: session, resume: resumeSession != nil, browser: browserControl,
                 onOutput: { [weak self] chunk in Task { @MainActor in
                     guard let self else { return }
                     // agentTick first: it unconditionally overwrites agentLine with the
@@ -714,6 +715,44 @@ final class AppState: ObservableObject {
             )
             if let p = procRef { runningAgents.append(p) }
         }
+    }
+
+    /// Registers the Playwright MCP server with the claude CLI, `--scope user` so it is
+    /// truly global — the default scope (`local`) ties it to whichever directory the
+    /// command happens to run from, which would make the settings copy's "your other
+    /// claude sessions can see it too" false for any session started elsewhere. A
+    /// persistent user-data-dir keeps the user's logins between runs; the window is
+    /// visible so they can intervene. This writes to the CLI's global config, so the
+    /// server is visible to the user's other claude sessions too — the settings copy
+    /// says so.
+    func enableBrowserControl() {
+        let dir = Profile.url.deletingLastPathComponent()
+            .appendingPathComponent("browser").path
+        let cmd = "claude mcp add playwright --scope user -- npx -y @playwright/mcp@latest "
+                + "--user-data-dir \(shellQuote(dir))"
+        agentBusy = true
+        agentLine = "🌐 setting up the browser…"
+        Task {
+            do {
+                _ = try await shellOutput(cmd)
+                agentLine = "✅ browser ready"
+            } catch {
+                UserDefaults.standard.set(false, forKey: "browserControl")
+                agentLine = "❌ \(error.localizedDescription)"
+            }
+            agentBusy = false
+            agentFade()
+        }
+    }
+
+    /// Undoes `enableBrowserControl()`. Without this, switching the toggle off would only
+    /// stop attaching `browserNote` to future tasks (see `runAgent`) while the Playwright
+    /// server stayed registered and `mcp__playwright` stayed in every claude agent's
+    /// allowlist (unconditionally — see `agentCommand`'s comment) — the one guardrail
+    /// gone, the capability still fully callable. Fire-and-forget: `claude mcp remove` on
+    /// a server that was never added, or already removed, is a harmless no-op either way.
+    func disableBrowserControl() {
+        Task { _ = try? await shellOutput("claude mcp remove playwright --scope user") }
     }
 
     /// One agent run that reads the user's documents and prints JSON. It goes through

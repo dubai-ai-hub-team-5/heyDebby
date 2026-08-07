@@ -847,6 +847,7 @@ struct ProfileSection: View {
 }
 
 struct SettingsView: View {
+    @EnvironmentObject var state: AppState
     @AppStorage("backend") private var backend = ""
     @AppStorage("apiKey") private var apiKey = ""
     @AppStorage("model") private var model = "claude-sonnet-5"
@@ -859,6 +860,7 @@ struct SettingsView: View {
     @AppStorage("voiceId") private var voiceId = ""
     @AppStorage("agentFullAccess") private var agentFullAccess = false
     @AppStorage("appControl") private var appControl = false
+    @AppStorage("browserControl") private var browserControl = false
 
     private func voiceLabel(_ v: AVSpeechSynthesisVoice) -> String {
         let tier = v.quality == .premium ? " · premium" : v.quality == .enhanced ? " · enhanced" : ""
@@ -934,6 +936,25 @@ struct SettingsView: View {
                  + "so a web page or email can influence it. Leave this off unless you want that.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(width: 260, alignment: .leading)
+            Toggle("Let Debby fill forms in a real browser (Playwright)", isOn: Binding(
+                get: { browserControl },
+                set: { newValue in
+                    browserControl = newValue
+                    if newValue { state.enableBrowserControl() } else { state.disableBrowserControl() }
+                }
+            ))
+            .disabled(!Claude.CLI.isLoggedIn)
+            if Claude.CLI.isLoggedIn {
+                Text("Debby fills forms in a real browser and stops for your OK before "
+                     + "anything is submitted. Registers a browser tool with the claude "
+                     + "CLI, so your other claude sessions can see it too.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
+            } else {
+                Text("needs the claude CLI — run `claude` once to sign in")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
+            }
             Spacer(minLength: 0)
             HStack {
                 Button("Open log…") { DebbyLog.reveal() }

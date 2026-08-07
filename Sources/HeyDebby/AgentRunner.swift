@@ -34,7 +34,11 @@ func agentCommand(backend: String, task: String, screenshotPath: String?,
     // agent's osascript call runs raw, never through BeatSplitter's refusal list, so it
     // is only handed out when the user has app control switched on. Off by default in
     // Settings means off here too, not a second door that skips the toggle.
-    var tools = "mcp__composio Read Glob Grep"
+    // mcp__playwright is granted unconditionally, the same way mcp__composio is: an
+    // allowed tool name nobody registered with the CLI is simply unusable, so listing it
+    // here costs nothing when the browser-control toggle has never been switched on. The
+    // real gate is `browserNote` below — see its comment.
+    var tools = "mcp__composio mcp__playwright Read Glob Grep"
     if appControl { tools += " Bash(osascript:*)" }
     return "claude -p\(sessionFlag) \(shellQuote(prompt)) --allowedTools \(tools)"
 }
@@ -47,6 +51,35 @@ let composioNote = """
 For app tasks: COMPOSIO_SEARCH_TOOLS to find tools, COMPOSIO_MULTI_EXECUTE_TOOL to run them. \
 If an app isn't connected yet, use COMPOSIO_MANAGE_CONNECTIONS and print the connection URL clearly \
 so the user can authorize it in their browser.)
+"""
+
+/// Appended to every agent task while browser control is on. No per-task classification:
+/// a note costs less than code that guesses which tasks are form tasks.
+///
+/// The profile PATH is passed, never its contents — a passport number on a command line
+/// is visible to every process on the machine via `ps`.
+///
+/// This is the ONLY thing standing between the agent and clicking Submit on a real form —
+/// mcp__playwright sits in `agentCommand`'s allowlist unconditionally (see its comment),
+/// so once the Playwright server is registered, whether Debby actually READS this note is
+/// the entire safety boundary. That is also why `AppState.disableBrowserControl()`
+/// unregisters the server when the toggle goes off: without that, turning browser control
+/// "off" would silently stop attaching this note to future tasks while leaving the browser
+/// tool itself fully callable — the one guardrail gone, the capability still live.
+let browserNote = """
+
+(You can drive a real browser with the Playwright tools. The user's own details — name, \
+date of birth, ID numbers, address — are in \(Profile.url.path); read that file when a \
+form asks for them, and say so if it is missing or lacks the field you need.
+
+Leave the browser window open so the user can watch and take over.
+
+NEVER type a password, a card number, or a one-time code. NEVER attempt a CAPTCHA. NEVER \
+click Submit, Pay, Confirm, or anything else that cannot be undone.
+
+When you reach any of those, or the form's own review page, print exactly one line:
+NEED: <one sentence saying what you need or what is about to happen>
+then stop and do nothing further. The user answers, and you will be resumed.)
 """
 
 /// The login shell an app-launched CLI gets: `-l` sources .zprofile but NOT .zshrc,
@@ -84,9 +117,9 @@ enum AgentRunner {
     /// `exec` replaces the shell with the CLI, so terminate() reaches the agent itself.
     @discardableResult
     static func run(backend: String, task: String, screenshotPath: String?, fullAccess: Bool, appControl: Bool,
-                    session: String? = nil, resume: Bool = false,
+                    session: String? = nil, resume: Bool = false, browser: Bool = false,
                     onOutput: @escaping (String) -> Void, onDone: @escaping (Int32) -> Void) -> Process? {
-        let agent = agentCommand(backend: backend, task: task + composioNote,
+        let agent = agentCommand(backend: backend, task: task + composioNote + (browser ? browserNote : ""),
                                  screenshotPath: screenshotPath, fullAccess: fullAccess, appControl: appControl,
                                  session: session, resume: resume)
         DebbyLog.write("AGENT (\(backend)) \(task)")
