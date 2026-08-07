@@ -44,6 +44,7 @@ final class AppState: ObservableObject {
     @Published var reply = ""             // last thing Debby said (also spoken aloud)
     @Published var agentLine = ""         // newest line of background-agent output
     @Published var agentBusy = false
+    @Published var pendingNeed: String?   // the agent stopped and asked; Confirm/Cancel are showing
     @Published var hovering = false       // cursor is on the notch
     @Published var levels = [CGFloat](repeating: 0, count: 28)
     @Published var isSpeaking = false     // TTS is active; pill shown near cursor
@@ -52,7 +53,7 @@ final class AppState: ObservableObject {
 
     /// The notch opens on hover, and whenever there's something to show.
     var notchExpanded: Bool {
-        hovering || isListening || isThinking || showNext || agentBusy || !reply.isEmpty
+        hovering || isListening || isThinking || showNext || agentBusy || !reply.isEmpty || pendingNeed != nil
     }
 
     weak var notch: NotchWindow?
@@ -73,6 +74,8 @@ final class AppState: ObservableObject {
     private var fadeTask: Task<Void, Never>?
     private var activeScreen: NSScreen?
     private var runningAgents: [Process] = []
+    private var needSession: String?      // the CLI session Confirm reattaches to
+    private var needScanner = NeedScanner()
     private var lessonPlayer: LessonPlayer?
     /// Raw stream text as far as it got, so a lesson that dies mid-flight can still tell
     /// history what it already drew.
@@ -193,6 +196,8 @@ final class AppState: ObservableObject {
         speakingText = ""
         reply = ""
         agentLine = ""
+        pendingNeed = nil
+        needSession = nil
         if isDrawing { isDrawing = false; drawingController.stop() }
     }
 
@@ -206,6 +211,8 @@ final class AppState: ObservableObject {
         runningAgents.removeAll()
         agentBusy = false
         agentLine = ""
+        pendingNeed = nil
+        needSession = nil
         history.removeAll()
         partial = ""
         reply = ""
@@ -304,6 +311,11 @@ final class AppState: ObservableObject {
         lessonPlayer?.cancel()
         lessonPlayer = nil
         pendingAdvance?.cancel()  // talking over the lesson stops it advancing
+        // Same reasoning as the lesson above: a gate is a paused agent speaking through the
+        // notch, and starting a fresh voice turn abandons it rather than leaving a stale
+        // Confirm around to reattach to a session the user has moved on from.
+        pendingNeed = nil
+        needSession = nil
         activeScreen = NSScreen.underMouse
         partial = ""
         reply = ""
@@ -352,6 +364,11 @@ final class AppState: ObservableObject {
         disarmClickWatch()
         pendingAdvance?.cancel()  // manual send supersedes a queued auto-advance
         showNext = false
+        // A new turn — talk or agent — supersedes any gate left waiting from a previous
+        // one. Confirm bypasses submit() entirely (it calls runAgent directly), so this
+        // never clobbers a real answer to the question that's showing.
+        pendingNeed = nil
+        needSession = nil
         if !auto { autoSteps = 0 }   // a new question starts a new lesson budget
         if let task = agentTask(from: text) {
             runAgent(task)
@@ -636,7 +653,15 @@ final class AppState: ObservableObject {
                           label: spec.label ?? "")
     }
 
-    private func runAgent(_ task: String) {
+    /// `resumeSession` is set only by `confirmNeed()`: it reattaches to the paused CLI
+    /// session instead of starting a fresh one, and — since the same long-running form can
+    /// gate more than once — it leaves `needSession` alone rather than overwriting it with
+    /// a value that's already correct.
+    private func runAgent(_ task: String, resumeSession: String? = nil) {
+        let session = resumeSession ?? UUID().uuidString
+        if resumeSession == nil { needSession = session }
+        needScanner = NeedScanner()
+        pendingNeed = nil
         agentBusy = true
         agentLine = "🤖 \(task)"
         let displayID = (activeScreen ?? NSScreen.underMouse).displayID
@@ -646,21 +671,48 @@ final class AppState: ObservableObject {
             procRef = AgentRunner.run(
                 backend: agentBackend, task: task, screenshotPath: shotPath,
                 fullAccess: agentFullAccess, appControl: appControl,
+                session: session, resume: resumeSession != nil,
                 onOutput: { [weak self] chunk in Task { @MainActor in self?.agentTick(chunk) } },
                 onDone: { [weak self] code in Task { @MainActor in
                     guard let self else { return }
+                    // The agent's last line usually has no trailing newline, so a NEED:
+                    // printed right before exit never reached feed()'s line-complete path —
+                    // without this flush the gate silently never opens and the run is
+                    // abandoned mid-form with the notch reading "✅ agent done".
+                    if let late = self.needScanner.flush() { self.pendingNeed = late }
                     self.agentBusy = false
-                    self.agentLine = code == 0 ? "✅ agent done" : "❌ agent exited (\(code))"
                     if let p = procRef { self.runningAgents.removeAll { $0 === p } }
-                    self.agentFade()
+                    if let need = self.pendingNeed {
+                        self.agentLine = "❓ \(need)"
+                        if self.voiceReplies { self.voice.speak(need) }
+                        // No agentFade() here: the question stays up until Confirm/Cancel.
+                    } else {
+                        self.agentLine = code == 0 ? "✅ agent done" : "❌ agent exited (\(code))"
+                        self.agentFade()
+                    }
                 } }
             )
             if let p = procRef { runningAgents.append(p) }
         }
     }
 
+    /// Confirm — reattach to the paused session and let it finish the step it stopped before.
+    func confirmNeed() {
+        guard let session = needSession else { return }
+        pendingNeed = nil
+        runAgent("Confirmed — proceed.", resumeSession: session)
+    }
+
+    /// Cancel — the session is abandoned. The browser window stays open; the user takes over.
+    func cancelNeed() {
+        pendingNeed = nil
+        needSession = nil
+        agentLine = ""
+    }
+
     /// The notch is a ticker, not a terminal: only the newest line of agent output shows.
     private func agentTick(_ chunk: String) {
+        if let need = needScanner.feed(chunk) { pendingNeed = need }
         guard let last = chunk.split(whereSeparator: \.isNewline).last(where: {
             !$0.trimmingCharacters(in: .whitespaces).isEmpty
         }) else { return }

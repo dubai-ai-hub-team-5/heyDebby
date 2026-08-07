@@ -84,9 +84,11 @@ enum AgentRunner {
     /// `exec` replaces the shell with the CLI, so terminate() reaches the agent itself.
     @discardableResult
     static func run(backend: String, task: String, screenshotPath: String?, fullAccess: Bool, appControl: Bool,
+                    session: String? = nil, resume: Bool = false,
                     onOutput: @escaping (String) -> Void, onDone: @escaping (Int32) -> Void) -> Process? {
         let agent = agentCommand(backend: backend, task: task + composioNote,
-                                 screenshotPath: screenshotPath, fullAccess: fullAccess, appControl: appControl)
+                                 screenshotPath: screenshotPath, fullAccess: fullAccess, appControl: appControl,
+                                 session: session, resume: resume)
         DebbyLog.write("AGENT (\(backend)) \(task)")
         return spawn(cliPathPrefix + "exec \(agent)", onOutput: onOutput, onDone: onDone)
     }
@@ -107,21 +109,42 @@ enum AgentRunner {
         // forever if it never sees EOF. We inherit the GUI app's stdin otherwise, which
         // is not something to gamble a silent hang on.
         proc.standardInput = FileHandle.nullDevice
+        // terminationHandler and the pipe's readabilityHandler are independent dispatch
+        // sources with no ordering guarantee between them: termination can fire while the
+        // last chunk written by the child is still sitting unread in the pipe. Tearing the
+        // handler down from terminationHandler (as this used to) drops that chunk on the
+        // floor — verified empirically, ~1 in 300 runs of a process that writes then exits
+        // immediately. That's exactly where an agent's NEED: marker lives, since it prints
+        // the line and exits right after — losing it means the gate silently never opens.
+        // Fix: let the read side detect its own EOF (an empty read) and wait for both EOF
+        // and process-exit before reporting done, per Apple's documented pattern for
+        // FileHandle.readabilityHandler.
+        let group = DispatchGroup()
+        var exitCode: Int32 = 0
+        group.enter()   // left once the pipe hits EOF
+        group.enter()   // left once the process has exited
         pipe.fileHandleForReading.readabilityHandler = { h in
             let d = h.availableData
-            if !d.isEmpty, let s = String(data: d, encoding: .utf8) {
+            guard !d.isEmpty else {
+                h.readabilityHandler = nil
+                group.leave()
+                return
+            }
+            if let s = String(data: d, encoding: .utf8) {
                 DebbyLog.raw(s)   // stream it: a run that hangs still leaves a trail
                 onOutput(s)
             }
         }
         proc.terminationHandler = { p in
-            pipe.fileHandleForReading.readabilityHandler = nil
+            exitCode = p.terminationStatus
             DebbyLog.write("EXIT \(p.terminationStatus)")
-            onDone(p.terminationStatus)
+            group.leave()
         }
+        group.notify(queue: .global()) { onDone(exitCode) }
         do {
             try proc.run()
         } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
             onOutput("Failed to launch the agent CLI: \(error.localizedDescription)\nIs it installed? (codex: `brew install codex` + `codex login`; claude: https://claude.com/claude-code)")
             onDone(-1)
             return nil

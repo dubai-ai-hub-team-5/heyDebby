@@ -433,6 +433,16 @@ func runSelfCheck() {
     assert(fullSess.contains("--session-id"), "full access still pins the session: \(fullSess)")
     assert(!fullSess.contains("--allowedTools"), "full access grants everything; no allowlist")
 
+    // The gate's Confirm reattaches with `resume: true` — full access must not change that
+    // shape, since the gate is not an escape hatch a fullAccess agent can bypass. The prior
+    // full-access coverage above only exercised the FRESH-session branch; resume+fullAccess
+    // together had no test at all.
+    let gateFull = agentCommand(backend: "claude", task: "Confirmed — proceed.",
+                                screenshotPath: nil, fullAccess: true,
+                                session: uuid, resume: true)
+    assert(gateFull.contains("-r \(shellQuote(uuid))"), "full access still resumes the same session: \(gateFull)")
+    assert(!gateFull.contains("--session-id"), "resume must not also pin a fresh session: \(gateFull)")
+
     // The marker is documented only when the feature is on. A model told about a marker
     // the app will drop announces actions that never happen.
     assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("RUN:"),
@@ -586,6 +596,18 @@ func runSelfCheck() {
            == "split right at the carriage return",
            "a lone \\r must terminate the line immediately, without waiting for a \\n")
     assert(crSplit.feed("\n") == nil, "the paired \\n arriving after must not fire a second time")
+
+    // A gate nobody can see is a hang: pendingNeed must keep the notch open, and Cancel
+    // must be able to clear it without ever touching AgentRunner (no CLI spawn here).
+    MainActor.assumeIsolated {
+        let gateState = AppState()
+        assert(!gateState.notchExpanded, "an idle notch has nothing to show")
+        gateState.pendingNeed = "does the gate work?"
+        assert(gateState.notchExpanded, "a pending NEED: must keep the notch open")
+        gateState.cancelNeed()
+        assert(gateState.pendingNeed == nil, "Cancel must clear the question")
+        assert(!gateState.notchExpanded, "clearing the only reason to be open must close it")
+    }
 }
 
 if CommandLine.arguments.contains("--selfcheck") {

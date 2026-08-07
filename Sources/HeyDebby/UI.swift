@@ -524,7 +524,26 @@ struct NotchView: View {
             .frame(height: 64)
 
             HStack(spacing: 14) {
-                if state.showNext && !state.isThinking && !state.isListening {
+                if state.pendingNeed != nil {
+                    // The agent stopped before something irreversible and is waiting —
+                    // "I did it" means something else here, so this gets its own labels.
+                    Button { state.confirmNeed() } label: {
+                        Label("Confirm", systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(.orange)
+                    .help("Let the agent proceed with what it asked")
+                    Button { state.cancelNeed() } label: {
+                        Label("Cancel", systemImage: "xmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(.red)
+                    .help("Abandon the agent's paused session — the browser stays open")
+                } else if state.showNext && !state.isThinking && !state.isListening {
                     Button { state.submit("Done — what's the next step?") } label: {
                         Label("I did it", systemImage: "checkmark.circle.fill")
                             .font(.system(size: 11, weight: .semibold))
