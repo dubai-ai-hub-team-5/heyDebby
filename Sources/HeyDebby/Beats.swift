@@ -5,6 +5,7 @@ enum Beat: Equatable {
     case say(String)
     case draw(ShapeSpec)
     case point(Annotation)
+    case run(String)     // one AppleScript statement, run as osascript arguments
 }
 
 /// Splits a model reply — streamed in fragments or handed over whole — into ordered beats.
@@ -63,6 +64,20 @@ struct BeatSplitter {
             }
             return out
         }
+        if let script = Self.payload(l, "RUN:") {
+            var out = flushProse()
+            if script.isEmpty {
+                DebbyLog.write("BEAT RUN: empty payload")
+            } else if Self.shellsOut(script) {
+                // AppleScript's escape hatch to the shell. The payload is model-written and
+                // the model reads the user's screen, so this is a prompt-injection path, not
+                // a hypothetical. Refuse it here, before Control ever sees it.
+                DebbyLog.write("BEAT RUN: refused, shells out: \(script.prefix(120))")
+            } else {
+                out.append(.run(script))
+            }
+            return out
+        }
         if let rest = Self.payload(l, "MORE:") {
             more = rest.lowercased().contains("yes")
             return []
@@ -98,6 +113,55 @@ struct BeatSplitter {
     private static func payload(_ line: String, _ marker: String) -> String? {
         guard line.uppercased().hasPrefix(marker) else { return nil }
         return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Every form the parser refuses, in the casing the system prompt should quote them in.
+    /// Shared (not just an implementation detail of `shellsOut`) so a selfcheck can assert
+    /// the prompt documents every one of these — the two lists drifting apart silently is
+    /// exactly what would let a model narrate an action that got dropped on the floor.
+    static let refusedForms = [
+        "do shell script",   // the shell, directly
+        "do script",         // Terminal / Script Editor run a command
+        "run script",        // evaluates AppleScript text at runtime
+        "load script",       // loads a script object, then `run` executes it
+        // Terminal emulators by any of their spellings: bare name, "Terminal.app", or
+        // `tell application id "com.apple.Terminal"`.
+        "Terminal", "iTerm", "Script Editor",
+        // Not a shell-out — a Standard Additions dialog. Refused anyway: it is a
+        // native-looking, ungated (no Automation permission) prompt that can carry a
+        // masked "hidden answer" text field, i.e. a ready-made credential-phishing
+        // primitive reachable from whatever text is on the user's screen.
+        "display dialog",
+    ]
+
+    /// AppleScript's routes to running arbitrary code, plus its route to a fake native
+    /// prompt. This is a denylist over a language neither of us fully enumerates, and it
+    /// is honest about being one.
+    ///
+    /// It refuses the known named routes to a shell and to AppleScript's own eval — `do
+    /// shell script`, `run script`, `load script`, and naming a terminal emulator — plus
+    /// the raw four-char event codes below, which reach the same places without any of
+    /// those words. `display dialog` doesn't run anything; it's refused because it's an
+    /// unpermissioned, masked-input prompt a screen full of text can trigger. It has been
+    /// defeated three times (whitespace-insensitivity, `run script` concatenation, raw
+    /// event codes) and hardened three times. It is a speed bump, not a boundary —
+    /// nothing here proves the list is complete.
+    ///
+    /// The real containment is elsewhere: execution is `osascript` argv, never a shell
+    /// string (see Control.swift), and the feature this gates is off by default.
+    ///
+    /// It does NOT hold for GUI scripting. `tell application "System Events" to keystroke`
+    /// is deliberately allowed — it is how non-scriptable apps are reached — and keystrokes
+    /// can open Spotlight and type into a terminal without naming one. This rail blocks
+    /// known shell-out and eval routes. It is not a boundary against a model that has been
+    /// induced by on-screen content to type a command.
+    private static func shellsOut(_ s: String) -> Bool {
+        // Raw four-char event codes — `«event sysoexec» "…"` — reach the same places the
+        // named commands do while containing none of their words. Any use of the raw-code
+        // syntax at all is refused; nothing a user asks for needs it.
+        if s.contains("«") || s.contains("»") { return true }
+        let flat = s.uppercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return refusedForms.contains { flat.contains($0.uppercased()) }
     }
 
     /// Emits every complete sentence in `prose`. A sentence ends at `.`, `!` or `?`

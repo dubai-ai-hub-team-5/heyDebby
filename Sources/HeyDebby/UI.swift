@@ -784,6 +784,7 @@ struct SettingsView: View {
     @AppStorage("voiceReplies") private var voiceReplies = true
     @AppStorage("voiceId") private var voiceId = ""
     @AppStorage("agentFullAccess") private var agentFullAccess = false
+    @AppStorage("appControl") private var appControl = false
 
     private func voiceLabel(_ v: AVSpeechSynthesisVoice) -> String {
         let tier = v.quality == .premium ? " · premium" : v.quality == .enhanced ? " · enhanced" : ""
@@ -848,6 +849,17 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Toggle("Agents: full access (skips sandbox/permissions — risky)", isOn: $agentFullAccess)
+            Toggle("Let Debby control apps (volume, Spotify, menus)", isOn: $appControl)
+            Text("Debby runs short AppleScript commands. macOS asks permission the first "
+                 + "time she talks to a named app, in Privacy & Security → Automation — "
+                 + "some commands, like volume, don't go through that gate at all.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(width: 260, alignment: .leading)
+            Text("Once you allow an app, Debby can control it fully, not just the one thing "
+                 + "you asked for. She also decides what to run from what's on your screen, "
+                 + "so a web page or email can influence it. Leave this off unless you want that.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(width: 260, alignment: .leading)
             Spacer(minLength: 0)
             HStack {
                 Button("Open log…") { DebbyLog.reveal() }

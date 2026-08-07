@@ -87,6 +87,110 @@ func runSelfCheck() {
     assert(splitWhole("This is **really** important.") == [.say("This is really important.")],
            "bold must be stripped from spoken prose: \(splitWhole("This is **really** important."))")
 
+    // --- RUN: app control ---
+    let vol = splitWhole("Turning it up.\nRUN: set volume output volume 60\nDone.")
+    assert(vol.count == 3, "RUN must be its own beat: \(vol)")
+    assert(vol[0] == .say("Turning it up.") && vol[2] == .say("Done."),
+           "a RUN line must not be spoken: \(vol)")
+    assert(vol[1] == .run("set volume output volume 60"), "RUN payload wrong: \(vol[1])")
+
+    // The payload is handed to osascript verbatim — quoting and punctuation must survive.
+    let track = splitWhole("RUN: tell application \"Spotify\" to play track \"spotify:track:1\"")
+    assert(track == [.run("tell application \"Spotify\" to play track \"spotify:track:1\"")],
+           "quotes and colons inside a RUN payload must survive: \(track)")
+
+    // AppleScript can shell out. The payload is model-written and the model reads the
+    // user's screen, so a page saying this is a live injection path — drop it at the parser.
+    assert(splitWhole("RUN: do shell script \"rm -rf ~\"") == [],
+           "do shell script must never become a beat")
+    assert(splitWhole("RUN: DO SHELL SCRIPT \"rm -rf ~\"") == [],
+           "the shell-out check is case-insensitive")
+    assert(splitWhole("RUN: tell app \"Terminal\" to do script \"rm -rf ~\"") == [],
+           "do script opens a Terminal window running a command — same hole")
+
+    // Ordering: a RUN between two sentences plays between them, not at the end.
+    let order = splitWhole("First.\nRUN: beep\nSecond.\nRUN: beep 2\nThird.")
+    assert(order.count == 5 && order[1] == .run("beep") && order[3] == .run("beep 2"),
+           "RUN beats must keep their position in the narration: \(order)")
+
+    // AppleScript ignores whitespace between tokens; the check must too.
+    assert(splitWhole("RUN: do  shell   script \"id\"") == [],
+           "extra spaces must not slip past the rail")
+    assert(splitWhole("RUN: do\tshell\tscript \"id\"") == [],
+           "tabs must not slip past the rail")
+    // The eval primitives, which can build the other forbidden phrases at runtime.
+    assert(splitWhole("RUN: run script (\"do sh\" & \"ell script \\\"id\\\"\")") == [],
+           "run script is eval — it defeats any lexical check downstream of it")
+    assert(splitWhole("RUN: load script file \"/tmp/x.scpt\"") == [],
+           "load script + run is the same hole in two steps")
+    // Telling a terminal is shell access wearing a hat.
+    assert(splitWhole("RUN: tell application \"Terminal\" to activate") == [],
+           "no talking to terminal emulators")
+    // The things we actually want must still work.
+    assert(splitWhole("RUN: set volume output volume 60")
+           == [.run("set volume output volume 60")], "volume must still work")
+    assert(splitWhole("RUN: tell application \"Spotify\" to playpause")
+           == [.run("tell application \"Spotify\" to playpause")], "Spotify must still work")
+    assert(splitWhole("RUN: tell application \"System Events\" to keystroke \"n\" using command down")
+           == [.run("tell application \"System Events\" to keystroke \"n\" using command down")],
+           "System Events must still work — it is how non-scriptable apps are reached")
+
+    // Known and accepted: GUI scripting is allowed, so RUN: is not a boundary against a
+    // determined injection. This asserts the limit deliberately — if it ever starts
+    // failing, someone tightened the rail and the settings copy needs to change with it.
+    // Asserting the exact beat (not just a count of 1) matters: deleting the whole RUN:
+    // branch also yields exactly one beat — a .say of the fallen-through prose line —
+    // so a bare `.count == 1` would stay green even with the branch gone.
+    let keystroke = splitWhole("RUN: tell application \"System Events\" to keystroke \"t\" using command down")
+    assert(keystroke == [.run("tell application \"System Events\" to keystroke \"t\" using command down")],
+           "keystroke injection is knowingly allowed; see shellsOut's comment")
+
+    // The bypasses that are NOT accepted.
+    assert(splitWhole("RUN: tell application id \"com.apple.Terminal\" to activate") == [],
+           "a terminal named by bundle id must still be refused")
+    assert(splitWhole("RUN: tell application \"Terminal.app\" to activate") == [],
+           "a terminal named with a .app suffix must still be refused")
+
+    // Raw four-char event codes contain none of the denylisted keywords and reach the
+    // same places `do shell script` does — demonstrated live with
+    // `osascript -e '«event sysoexec» "id -un"'`. Any use of the raw-code syntax is refused.
+    assert(splitWhole("RUN: «event sysoexec» \"touch /tmp/pwned; id -un\"") == [],
+           "raw four-char event codes must be refused — they carry no denylisted keyword")
+    assert(splitWhole("RUN: tell application id \"«event sysoexec»\" to activate") == [],
+           "a guillemet anywhere in the payload is refused, not just at the start")
+    // An ordinary payload with neither guillemet must be unaffected by the new check.
+    assert(splitWhole("RUN: tell application \"Spotify\" to playpause")
+           == [.run("tell application \"Spotify\" to playpause")],
+           "a payload containing neither guillemet must still pass")
+
+    // `display dialog` is a zero-permission, native-looking prompt that can carry a masked
+    // "hidden answer" field — a credential-phishing primitive reachable from on-screen text,
+    // not a shell-out, but refused for the same reason: it must never become a beat.
+    assert(splitWhole("RUN: display dialog \"macOS needs your password to continue\" with hidden answer") == [],
+           "display dialog must be refused — it's a masked-input credential prompt")
+    assert(splitWhole("RUN: display dialog \"Enter your name\" default answer \"\"") == [],
+           "display dialog is refused wholesale, even without hidden answer")
+    // A nearby, legitimate payload that must still pass: display notification carries no
+    // text field at all, so it isn't the phishing shape and shouldn't be caught in the net.
+    assert(splitWhole("RUN: display notification \"Volume set to 60%\"")
+           == [.run("display notification \"Volume set to 60%\"")],
+           "display notification has no text field and must still work")
+
+    // --- Control: argv, not a shell string ---
+    // The executable is the branch's headline security property: swapping it for
+    // /bin/zsh with a joined command string would keep every `arguments` assertion below
+    // green while reopening the exact hole AgentRunner.spawn's zsh -lc path has.
+    assert(Control.executablePath == "/usr/bin/osascript",
+           "statements must run through osascript, never a shell")
+    assert(Control.arguments(for: ["set volume output volume 60"])
+           == ["-e", "set volume output volume 60"], "one statement, one -e pair")
+    assert(Control.arguments(for: ["a", "b"]) == ["-e", "a", "-e", "b"],
+           "statements run in order, each its own -e")
+    // The whole point of an arguments array: shell metacharacters are inert data.
+    let nasty = "tell app \"X\" to y'; rm -rf ~; echo '"
+    assert(Control.arguments(for: [nasty]) == ["-e", nasty],
+           "a payload with shell metacharacters must arrive verbatim, unquoted and unsplit")
+
     let r1 = parseReply("Click the File menu.\nPOINT: {\"x\":0.1,\"y\":0.2,\"label\":\"File\"}")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
     assert(r1.annotations.count == 1 && r1.annotations[0].label == "File"
@@ -198,6 +302,18 @@ func runSelfCheck() {
     assert(played3 == ["say:a", "draw:line", "say:b"],
            "voiceReplies off must not stall the queue: \(played3)")
 
+    // A .run beat fires in order and does not block what follows, unlike .say.
+    let lp6 = LessonPlayer()
+    var played6: [String] = []
+    lp6.onSay = { played6.append("say:\($0)") }
+    lp6.onRun = { played6.append("run:\($0)") }
+    lp6.append([.run("beep"), .say("hello"), .run("beep 2")])
+    assert(played6 == ["run:beep", "say:hello"],
+           "a run before a sentence fires immediately; the one after it waits: \(played6)")
+    lp6.speechFinished()
+    assert(played6 == ["run:beep", "say:hello", "run:beep 2"],
+           "the trailing run fires once the sentence ends: \(played6)")
+
     // A right triangle can't come from a bounding box — 3 points must reach the path as given.
     let tri = DrawnShape(tool: .triangle,
                          points: [CGPoint(x: 0, y: 100), CGPoint(x: 0, y: 0), CGPoint(x: 80, y: 100)],
@@ -235,19 +351,71 @@ func runSelfCheck() {
     assert(agentTask(from: "what does this button do") == nil)
     assert(agentTask(from: "agents are cool right") == nil)
     assert(shellQuote("it's") == "'it'\\''s'")
-    let cx = agentCommand(backend: "codex", task: "hi", screenshotPath: "/tmp/s.jpg", fullAccess: false)
+    let cx = agentCommand(backend: "codex", task: "hi", screenshotPath: "/tmp/s.jpg", fullAccess: false, appControl: true)
     assert(cx.contains("codex exec --skip-git-repo-check") && cx.contains("-i '/tmp/s.jpg'")
            && cx.contains("-s read-only") && cx.hasSuffix("'hi'"), "codex cmd wrong: \(cx)")
-    assert(agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: true)
+    assert(agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: true, appControl: true)
         .contains("--dangerously-bypass-approvals-and-sandbox"))
-    assert(agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: true)
+    assert(agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: true, appControl: false)
         .contains("claude -p --dangerously-skip-permissions"))
     // Without an allowlist `claude -p` denies every tool, so app tasks fail silently.
     // The prompt must come before --allowedTools, which is variadic and eats what follows.
-    let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false)
-    assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep"), "claude agent needs tools: \(cl)")
+    let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false, appControl: true)
+    assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep Bash(osascript:*)"),
+           "claude agent needs tools: \(cl)")
     assert(cl.range(of: "'email bob'")!.upperBound <= cl.range(of: "--allowedTools")!.lowerBound,
            "prompt must precede the variadic flag: \(cl)")
+
+    // Agents get scoped shell for AppleScript — not bare Bash — and ONLY when the user has
+    // switched app control on. An agent's osascript call runs raw, never through
+    // BeatSplitter's refusal list, so this grant must not be a second, ungated door into
+    // the same capability the RUN: rail exists to gate.
+    let ag = agentCommand(backend: "claude", task: "play some music",
+                          screenshotPath: nil, fullAccess: false, appControl: true)
+    assert(ag.contains("Bash(osascript:*)"),
+           "app control on: the claude agent needs scoped osascript for app tasks: \(ag)")
+    assert(ag.range(of: "'play some music'")!.upperBound
+           <= ag.range(of: "--allowedTools")!.lowerBound,
+           "--allowedTools is variadic and must stay last")
+    let agOff = agentCommand(backend: "claude", task: "play some music",
+                             screenshotPath: nil, fullAccess: false, appControl: false)
+    assert(!agOff.contains("osascript"),
+           "app control off: the agent grant must not include osascript either: \(agOff)")
+    // Full access already implies everything; the scoped entry would be noise.
+    assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false, appControl: true)
+            .contains("osascript"), "codex agents are unaffected")
+
+    // The marker is documented only when the feature is on. A model told about a marker
+    // the app will drop announces actions that never happen.
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("RUN:"),
+           "app control on must document the marker")
+    assert(!Claude.promptTemplate(aspect: 1.6, appControl: false).contains("RUN:"),
+           "app control off must not mention the marker")
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("do shell script"),
+           "the prompt must tell the model the shell escape is refused")
+    // Adjacent RUN: lines are not serialized (each spawns its own osascript process) even
+    // with voice replies off, when .say never blocks the queue either — so the prompt must
+    // not claim a sentence in between guarantees order, only that a single statement does.
+    let runOnPrompt = Claude.promptTemplate(aspect: 1.6, appControl: true)
+    assert(runOnPrompt.contains("finish out of order") && runOnPrompt.contains("single statement"),
+           "the prompt must warn RUN lines can race and point at one statement, not a sentence, as the fix")
+    assert(!runOnPrompt.contains("always finishes before the next line runs"),
+           "the ordering claim must not promise something LessonPlayer doesn't deliver when voiceReplies is off")
+    // The prompt's refusal list must name every form the parser actually refuses, or a model
+    // asked for a refused one emits a RUN line that is silently dropped and narrates success.
+    for term in BeatSplitter.refusedForms {
+        assert(runOnPrompt.localizedCaseInsensitiveContains(term),
+               "prompt must document refused form: \(term)")
+    }
+    // "You cannot act on apps yourself" (the agent-routing paragraph) would directly
+    // contradict the RUN: section once app control is on — it must not appear together
+    // with RUN:, and RUN:'s absence must not lose the agent-routing guidance either.
+    assert(!Claude.promptTemplate(aspect: 1.6, appControl: true).contains("cannot act on apps"),
+           "app control on must not still claim apps are out of reach")
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("agent:"),
+           "app control on must still route multi-step work to an agent")
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: false).contains("cannot act on apps"),
+           "app control off keeps the original agent-only framing")
     let mid = mapToScreen(Annotation(x: 0.5, y: 0.5, label: "t"),
                           container: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5))
     assert(abs(mid.x - 0.5) < 1e-9 && abs(mid.y - 0.5) < 1e-9, "container center mapping wrong")

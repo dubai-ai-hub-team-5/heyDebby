@@ -5,7 +5,8 @@ func shellQuote(_ s: String) -> String {
 }
 
 /// Pure command builder (selfcheck-tested). backend: "codex" or "claude".
-func agentCommand(backend: String, task: String, screenshotPath: String?, fullAccess: Bool) -> String {
+func agentCommand(backend: String, task: String, screenshotPath: String?,
+                  fullAccess: Bool, appControl: Bool) -> String {
     if backend == "codex" {
         var cmd = "codex exec --skip-git-repo-check"
         if let p = screenshotPath { cmd += " -i \(shellQuote(p))" }
@@ -21,7 +22,14 @@ func agentCommand(backend: String, task: String, screenshotPath: String?, fullAc
     }
     // Without an allowlist `claude -p` denies every tool, so an app task fails silently.
     // --allowedTools is variadic: it must be last, and the prompt must precede it.
-    return "claude -p \(shellQuote(prompt)) --allowedTools mcp__composio Read Glob Grep"
+    // Bash(osascript:*) is scoped rather than bare Bash deliberately: an agent that can
+    // run AppleScript is a much smaller grant than one that can run anything — but an
+    // agent's osascript call runs raw, never through BeatSplitter's refusal list, so it
+    // is only handed out when the user has app control switched on. Off by default in
+    // Settings means off here too, not a second door that skips the toggle.
+    var tools = "mcp__composio Read Glob Grep"
+    if appControl { tools += " Bash(osascript:*)" }
+    return "claude -p \(shellQuote(prompt)) --allowedTools \(tools)"
 }
 
 // Both CLIs have the Composio MCP gateway registered (connect.composio.dev) —
@@ -55,7 +63,8 @@ func shellOutput(_ cmd: String) async throws -> String {
 
 /// onOutput lands on the pipe's queue and onDone on the termination queue — different
 /// threads, so the buffer needs a lock rather than a bare captured var.
-private final class OutputBox: @unchecked Sendable {
+/// Internal (not private): Control.swift reuses this for the same reason.
+final class OutputBox: @unchecked Sendable {
     private let lock = NSLock()
     private var buf = ""
     func append(_ s: String) { lock.lock(); buf += s; lock.unlock() }
@@ -67,10 +76,10 @@ enum AgentRunner {
     /// Returns the running process so callers can terminate it (nil if launch failed).
     /// `exec` replaces the shell with the CLI, so terminate() reaches the agent itself.
     @discardableResult
-    static func run(backend: String, task: String, screenshotPath: String?, fullAccess: Bool,
+    static func run(backend: String, task: String, screenshotPath: String?, fullAccess: Bool, appControl: Bool,
                     onOutput: @escaping (String) -> Void, onDone: @escaping (Int32) -> Void) -> Process? {
         let agent = agentCommand(backend: backend, task: task + composioNote,
-                                 screenshotPath: screenshotPath, fullAccess: fullAccess)
+                                 screenshotPath: screenshotPath, fullAccess: fullAccess, appControl: appControl)
         DebbyLog.write("AGENT (\(backend)) \(task)")
         return spawn(cliPathPrefix + "exec \(agent)", onOutput: onOutput, onDone: onDone)
     }
