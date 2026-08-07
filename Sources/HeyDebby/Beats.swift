@@ -25,7 +25,12 @@ struct BeatSplitter {
     mutating func feed(_ chunk: String) -> [Beat] {
         var out: [Beat] = []
         for ch in chunk {
-            if ch == "\n" { out += flushLine() } else { line.append(ch) }
+            // `isNewline`, not `== "\n"`: a PTY-wrapped subprocess (or a model backend)
+            // writes "\r\n". Swift fuses that into one grapheme cluster distinct from
+            // plain "\n" whenever both bytes land in the same chunk, so `== "\n"` never
+            // matches and the line never terminates. `isNewline` also catches a lone "\r"
+            // when the chunk boundary falls between the \r and the \n.
+            if ch.isNewline { out += flushLine() } else { line.append(ch) }
         }
         return out
     }
@@ -39,7 +44,7 @@ struct BeatSplitter {
     }
 
     private mutating func flushLine() -> [Beat] {
-        let raw = line.trimmingCharacters(in: .whitespaces)
+        let raw = line.trimmingCharacters(in: .whitespacesAndNewlines)
         line = ""
         let l = Self.normalize(raw)
         if l.isEmpty { return prose.isEmpty ? [] : releaseSentences() }
@@ -112,7 +117,7 @@ struct BeatSplitter {
 
     private static func payload(_ line: String, _ marker: String) -> String? {
         guard line.uppercased().hasPrefix(marker) else { return nil }
-        return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+        return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Every form the parser refuses, in the casing the system prompt should quote them in.

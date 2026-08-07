@@ -13,7 +13,12 @@ struct NeedScanner {
     mutating func feed(_ chunk: String) -> String? {
         var hit: String?
         for ch in chunk {
-            if ch == "\n" {
+            // `isNewline`, not `== "\n"`: a PTY-wrapped subprocess writes "\r\n", and Swift
+            // fuses that into a single grapheme cluster distinct from plain "\n" whenever
+            // both bytes land in the same chunk — `== "\n"` never matches it and the line
+            // is never terminated. `isNewline` also catches a lone "\r" when the chunk
+            // boundary falls between the \r and the \n.
+            if ch.isNewline {
                 if let n = take(line) { hit = hit ?? n }
                 line = ""
             } else {
@@ -32,9 +37,9 @@ struct NeedScanner {
 
     private mutating func take(_ l: String) -> String? {
         guard !fired else { return nil }
-        let t = l.trimmingCharacters(in: .whitespaces)
+        let t = l.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.uppercased().hasPrefix("NEED:") else { return nil }
-        let q = String(t.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+        let q = String(t.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return nil }
         fired = true
         return q

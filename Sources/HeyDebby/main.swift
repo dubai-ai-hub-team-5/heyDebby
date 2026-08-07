@@ -176,6 +176,23 @@ func runSelfCheck() {
            == [.run("display notification \"Volume set to 60%\"")],
            "display notification has no text field and must still work")
 
+    // --- CRLF: a PTY-wrapped subprocess writes \r\n, not \n ---
+    // The whole lesson, replayed with CRLF line endings in one chunk, must produce the
+    // exact same beats. Swift fuses a same-chunk "\r\n" into one grapheme cluster distinct
+    // from "\n" — a naive `ch == "\n"` check never matches it, so without the fix nothing
+    // in this string would flush mid-stream at all; only `finish()`'s single trailing
+    // flushLine() would run, on the whole glued blob, producing one garbled prose beat.
+    let crlfLesson = lesson.replacingOccurrences(of: "\n", with: "\r\n")
+    assert(splitWhole(crlfLesson) == lb,
+           "CRLF line endings must not change the beats: \(splitWhole(crlfLesson))")
+    // The marker path specifically, not just prose: a CRLF-terminated RUN: line.
+    let crlfRun = splitWhole("Turning it up.\r\nRUN: set volume output volume 60\r\nDone.")
+    assert(crlfRun == vol, "a CRLF-terminated RUN line must parse the same as an LF one: \(crlfRun)")
+    // CRLF-separated prose must still split into two sentences, not one glued blob.
+    let crlfProse = splitWhole("First sentence.\r\nSecond sentence.\r\n")
+    assert(crlfProse == [.say("First sentence."), .say("Second sentence.")],
+           "CRLF between sentences must not glue them together: \(crlfProse)")
+
     // --- Control: argv, not a shell string ---
     // The executable is the branch's headline security property: swapping it for
     // /bin/zsh with a joined command string would keep every `arguments` assertion below
@@ -522,6 +539,22 @@ func runSelfCheck() {
     let needLine = "NEED: split one character at a time\n"
     assert(scanAll(needLine.map { String($0) }) == "split one character at a time",
            "a marker fed one character per chunk must still be found")
+
+    // CRLF: a PTY-wrapped subprocess writes "\r\n". Swift fuses a same-chunk "\r\n" into
+    // one grapheme cluster distinct from plain "\n" — a naive `ch == "\n"` check never
+    // fires on it, the line never terminates, and the gate never opens.
+    assert(scanAll(["Filling the form…\r\nNEED: Ready to submit — please confirm.\r\n"])
+           == "Ready to submit — please confirm.", "a CRLF-terminated marker must still be found")
+    // The pathological split: the chunk boundary falls between \r and \n, so each arrives
+    // as its own standalone character rather than a fused pair. This must resolve the line
+    // on the \r alone, immediately — checking the *final* accumulated text isn't enough to
+    // prove that, because a wide trim can silently mop up a \r that leaked in too late; the
+    // first feed() call has to already return the hit.
+    var crSplit = NeedScanner()
+    assert(crSplit.feed("NEED: split right at the carriage return\r")
+           == "split right at the carriage return",
+           "a lone \\r must terminate the line immediately, without waiting for a \\n")
+    assert(crSplit.feed("\n") == nil, "the paired \\n arriving after must not fire a second time")
 }
 
 if CommandLine.arguments.contains("--selfcheck") {
