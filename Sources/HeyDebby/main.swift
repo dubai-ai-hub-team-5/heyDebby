@@ -163,6 +163,19 @@ func runSelfCheck() {
            == [.run("tell application \"Spotify\" to playpause")],
            "a payload containing neither guillemet must still pass")
 
+    // `display dialog` is a zero-permission, native-looking prompt that can carry a masked
+    // "hidden answer" field — a credential-phishing primitive reachable from on-screen text,
+    // not a shell-out, but refused for the same reason: it must never become a beat.
+    assert(splitWhole("RUN: display dialog \"macOS needs your password to continue\" with hidden answer") == [],
+           "display dialog must be refused — it's a masked-input credential prompt")
+    assert(splitWhole("RUN: display dialog \"Enter your name\" default answer \"\"") == [],
+           "display dialog is refused wholesale, even without hidden answer")
+    // A nearby, legitimate payload that must still pass: display notification carries no
+    // text field at all, so it isn't the phishing shape and shouldn't be caught in the net.
+    assert(splitWhole("RUN: display notification \"Volume set to 60%\"")
+           == [.run("display notification \"Volume set to 60%\"")],
+           "display notification has no text field and must still work")
+
     // --- Control: argv, not a shell string ---
     // The executable is the branch's headline security property: swapping it for
     // /bin/zsh with a joined command string would keep every `arguments` assertion below
