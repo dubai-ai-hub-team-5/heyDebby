@@ -488,6 +488,40 @@ func runSelfCheck() {
     assert(OpenAI.delta(fromSSELine:
         "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"a\\\":1}\"}") == nil,
         "a function-call-arguments delta is not speech")
+
+    // --- NEED: the agent's confirm gate ---
+    func scanAll(_ chunks: [String]) -> String? {
+        var s = NeedScanner()
+        var found: String?
+        for c in chunks { if let n = s.feed(c), found == nil { found = n } }
+        return found
+    }
+    assert(scanAll(["Filling the form…\nNEED: Ready to submit — £88.50. Submit?\n"])
+           == "Ready to submit — £88.50. Submit?", "NEED must be found in a multi-line chunk")
+    // The bug this scanner exists for: a pipe can split anywhere.
+    assert(scanAll(["Filling…\nNE", "ED: the code from your phone\n"])
+           == "the code from your phone", "a marker split across chunks must still be found")
+    assert(scanAll(["done\nNEED: first question\nNEED: second question\n"])
+           == "first question", "the first NEED wins; the agent stops after printing one")
+    assert(scanAll(["all done, no gate here\n"]) == nil, "no marker means no gate")
+    // A line that merely mentions the word is not a marker: it must start the line.
+    assert(scanAll(["I NEED: nothing\n"]) == nil, "NEED must start its line")
+    // Unterminated: the agent exits without a trailing newline more often than not.
+    assert(scanAll(["NEED: last line, no newline"]) == nil,
+           "an incomplete line is not yet a marker — flush() covers this case")
+
+    var fs = NeedScanner()
+    _ = fs.feed("NEED: last line, no newline")
+    assert(fs.flush() == "last line, no newline", "flush must catch the unterminated last line")
+    assert(fs.flush() == nil, "flush twice must not fire twice")
+
+    // A case the given tests don't cover: the given split-across-chunks test breaks the
+    // marker in two, both pieces still inside the word "NEED". Break it into one chunk per
+    // character instead, so the buffer has to carry state across many feed() calls in a
+    // row, including a break right at the colon and right after it.
+    let needLine = "NEED: split one character at a time\n"
+    assert(scanAll(needLine.map { String($0) }) == "split one character at a time",
+           "a marker fed one character per chunk must still be found")
 }
 
 if CommandLine.arguments.contains("--selfcheck") {
