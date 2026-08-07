@@ -123,6 +123,24 @@ enum AgentRunner {
         var exitCode: Int32 = 0
         group.enter()   // left once the pipe hits EOF
         group.enter()   // left once the process has exited
+        // Waiting for both sides unconditionally trades one bug for another: a descendant
+        // that outlives `proc` and still holds the pipe's write end open (an orphaned MCP
+        // stdio server, a backgrounded tool) means EOF may never arrive even though `proc`
+        // itself has long since exited — group.notify would then wait forever, and since
+        // this is the one path every backend shares, shellOutput's caller (the plain chat
+        // backend) would hang instead of erroring. finishOnce below makes "EOF actually
+        // arrives" and "the grace period expires" a race with a single winner: whichever
+        // happens first reports done, and the loser is a no-op.
+        let doneLock = NSLock()
+        var finished = false
+        func finishOnce() {
+            doneLock.lock()
+            let already = finished
+            finished = true
+            doneLock.unlock()
+            guard !already else { return }
+            onDone(exitCode)
+        }
         pipe.fileHandleForReading.readabilityHandler = { h in
             let d = h.availableData
             guard !d.isEmpty else {
@@ -139,8 +157,21 @@ enum AgentRunner {
             exitCode = p.terminationStatus
             DebbyLog.write("EXIT \(p.terminationStatus)")
             group.leave()
+            // A few seconds is plenty for a pipe that's actually drained (EOF normally
+            // arrives within milliseconds of exit); past that, a descendant is still
+            // holding it open and more output isn't coming on any schedule we control.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+                doneLock.lock()
+                let stillWaiting = !finished
+                doneLock.unlock()
+                if stillWaiting {
+                    DebbyLog.write("EOF grace period expired — proceeding with partial output")
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                }
+                finishOnce()
+            }
         }
-        group.notify(queue: .global()) { onDone(exitCode) }
+        group.notify(queue: .global(), execute: finishOnce)
         do {
             try proc.run()
         } catch {

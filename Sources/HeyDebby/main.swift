@@ -597,16 +597,76 @@ func runSelfCheck() {
            "a lone \\r must terminate the line immediately, without waiting for a \\n")
     assert(crSplit.feed("\n") == nil, "the paired \\n arriving after must not fire a second time")
 
-    // A gate nobody can see is a hang: pendingNeed must keep the notch open, and Cancel
-    // must be able to clear it without ever touching AgentRunner (no CLI spawn here).
+    // --- agentOutcome: the pure decision onDone makes, testable with no scanner/process ---
+    let doneOK = agentOutcome(exitCode: 0, need: nil)
+    assert(doneOK.line == "✅ agent done" && doneOK.fades, "a clean exit with no question fades")
+    let doneErr = agentOutcome(exitCode: 2, need: nil)
+    assert(doneErr.line == "❌ agent exited (2)" && doneErr.fades, "a nonzero exit with no question fades")
+    let gated = agentOutcome(exitCode: 0, need: "q")
+    assert(gated.line == "❓ q" && !gated.fades, "a question must not fade — it waits for Confirm/Cancel")
+    let gatedNonzero = agentOutcome(exitCode: 1, need: "q")
+    assert(gatedNonzero.line == "❓ q" && !gatedNonzero.fades,
+           "a NEED: seen right before a nonzero exit still shows the question, not the error")
+
+    // A gate nobody can see is a hang: a pending question must keep the notch open, and
+    // Cancel must be able to clear it without ever touching AgentRunner (no CLI spawn
+    // here) — feedGate/finishGate are exercised directly, with synthetic chunks, so this
+    // is the real agentTick/onDone call sites under test, not a reimplementation of them.
     MainActor.assumeIsolated {
         let gateState = AppState()
         assert(!gateState.notchExpanded, "an idle notch has nothing to show")
-        gateState.pendingNeed = "does the gate work?"
+        var scanner = NeedScanner()
+        gateState.feedGate("NEED: does the gate work?\n", into: &scanner, session: "T", process: nil)
+        assert(gateState.pendingNeed == "does the gate work?", "feedGate must open the gate on a complete line")
         assert(gateState.notchExpanded, "a pending NEED: must keep the notch open")
         gateState.cancelNeed()
         assert(gateState.pendingNeed == nil, "Cancel must clear the question")
         assert(!gateState.notchExpanded, "clearing the only reason to be open must close it")
+    }
+
+    // The agent's last line usually has no trailing newline — feedGate alone must not
+    // catch it; only finishGate's flush does, at exit.
+    MainActor.assumeIsolated {
+        let gateState = AppState()
+        var scanner = NeedScanner()
+        gateState.feedGate("NEED: no trailing newline", into: &scanner, session: "T", process: nil)
+        assert(gateState.pendingNeed == nil, "an incomplete line must not open the gate yet")
+        let outcome = gateState.finishGate(flushing: &scanner, session: "T", exitCode: 0)
+        assert(gateState.pendingNeed == "no trailing newline", "finishGate's flush must catch the unterminated last line")
+        assert(outcome.line == "❓ no trailing newline" && !outcome.fades, "finishGate must report the same gated outcome")
+    }
+
+    // Critical regression: the question and the session Confirm resumes must always be
+    // the SAME atomic value. A second run's gate must never leave the first run's
+    // question paired with the second run's session (or vice versa) — there is no
+    // separate `needSession`-style slot left to desync from `pendingNeed` at all.
+    MainActor.assumeIsolated {
+        let gateState = AppState()
+        var scannerA = NeedScanner()
+        var scannerB = NeedScanner()
+        gateState.feedGate("NEED: A's question\n", into: &scannerA, session: "SESSION-A", process: nil)
+        assert(gateState.gate?.session == "SESSION-A" && gateState.pendingNeed == "A's question")
+        gateState.feedGate("NEED: B's question\n", into: &scannerB, session: "SESSION-B", process: nil)
+        assert(gateState.pendingNeed == "B's question" && gateState.gate?.session == "SESSION-B",
+               "the question on screen and the session Confirm would resume must always travel together")
+    }
+
+    // Cancel must actually stop a still-running gate process, not just forget about it —
+    // a paused agent has usually already exited by the time onDone opens a gate, but a
+    // gate opened mid-stream (feedGate, before exit is confirmed) can still be live.
+    MainActor.assumeIsolated {
+        let gateState = AppState()
+        let sleepy = Process()
+        sleepy.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleepy.arguments = ["30"]
+        try! sleepy.run()
+        assert(sleepy.isRunning, "the process must actually be running before this test means anything")
+        var scanner = NeedScanner()
+        gateState.feedGate("NEED: still running\n", into: &scanner, session: "C", process: sleepy)
+        gateState.cancelNeed()
+        // terminate() delivers SIGTERM; the kernel takes a moment to land it.
+        for _ in 0..<100 where sleepy.isRunning { usleep(20_000) }
+        assert(!sleepy.isRunning, "Cancel must terminate a gate's still-running process, not just forget it")
     }
 }
 

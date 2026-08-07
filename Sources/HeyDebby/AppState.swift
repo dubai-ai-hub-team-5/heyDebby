@@ -34,6 +34,25 @@ func micLevel(rms: Float) -> CGFloat {
     return CGFloat(max(0, min(1, (db + 50) / 50)))
 }
 
+/// One paused run's confirm gate — the question, the session it belongs to, and (if the
+/// agent hasn't been confirmed exited yet) the process that asked — bound together so
+/// Confirm can never resume a session other than the one that actually paused, and a
+/// second run's session id can never end up paired with a first run's question.
+struct Gate {
+    let question: String
+    let session: String
+    let process: Process?
+}
+
+/// What onDone shows once a run finishes: a question if a NEED: was seen (during the
+/// stream, via `feedGate`, or in an unterminated final line, via `finishGate`), otherwise
+/// a plain done/error line that fades. Pure — no scanner, no process, no AppState — so
+/// this is the feature's actual decision, testable without a running agent.
+func agentOutcome(exitCode: Int32, need: String?) -> (line: String, fades: Bool) {
+    if let need { return ("❓ \(need)", false) }
+    return (exitCode == 0 ? "✅ agent done" : "❌ agent exited (\(exitCode))", true)
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var isListening = false
@@ -44,7 +63,12 @@ final class AppState: ObservableObject {
     @Published var reply = ""             // last thing Debby said (also spoken aloud)
     @Published var agentLine = ""         // newest line of background-agent output
     @Published var agentBusy = false
-    @Published var pendingNeed: String?   // the agent stopped and asked; Confirm/Cancel are showing
+    // Settable only from inside AppState (openGate/closeGate) — Confirm and Cancel are the
+    // only outside ways to change it, and both always see question+session+process as one
+    // consistent value, never a torn read across separate slots.
+    @Published private(set) var gate: Gate?
+    /// The question currently showing, if any. Read-only view onto `gate` for the notch.
+    var pendingNeed: String? { gate?.question }
     @Published var hovering = false       // cursor is on the notch
     @Published var levels = [CGFloat](repeating: 0, count: 28)
     @Published var isSpeaking = false     // TTS is active; pill shown near cursor
@@ -53,7 +77,7 @@ final class AppState: ObservableObject {
 
     /// The notch opens on hover, and whenever there's something to show.
     var notchExpanded: Bool {
-        hovering || isListening || isThinking || showNext || agentBusy || !reply.isEmpty || pendingNeed != nil
+        hovering || isListening || isThinking || showNext || agentBusy || !reply.isEmpty || gate != nil
     }
 
     weak var notch: NotchWindow?
@@ -74,8 +98,7 @@ final class AppState: ObservableObject {
     private var fadeTask: Task<Void, Never>?
     private var activeScreen: NSScreen?
     private var runningAgents: [Process] = []
-    private var needSession: String?      // the CLI session Confirm reattaches to
-    private var needScanner = NeedScanner()
+    private var agentFadeTask: Task<Void, Never>?
     private var lessonPlayer: LessonPlayer?
     /// Raw stream text as far as it got, so a lesson that dies mid-flight can still tell
     /// history what it already drew.
@@ -195,9 +218,7 @@ final class AppState: ObservableObject {
         isSpeaking = false
         speakingText = ""
         reply = ""
-        agentLine = ""
-        pendingNeed = nil
-        needSession = nil
+        closeGate()
         if isDrawing { isDrawing = false; drawingController.stop() }
     }
 
@@ -210,9 +231,7 @@ final class AppState: ObservableObject {
         runningAgents.forEach { $0.terminate() }
         runningAgents.removeAll()
         agentBusy = false
-        agentLine = ""
-        pendingNeed = nil
-        needSession = nil
+        closeGate()
         history.removeAll()
         partial = ""
         reply = ""
@@ -312,10 +331,11 @@ final class AppState: ObservableObject {
         lessonPlayer = nil
         pendingAdvance?.cancel()  // talking over the lesson stops it advancing
         // Same reasoning as the lesson above: a gate is a paused agent speaking through the
-        // notch, and starting a fresh voice turn abandons it rather than leaving a stale
-        // Confirm around to reattach to a session the user has moved on from.
-        pendingNeed = nil
-        needSession = nil
+        // notch, and starting a fresh voice turn — the app's primary modality — abandons it
+        // rather than leaving a stale Confirm around to reattach to a session the user has
+        // moved on from. closeGate() also blanks agentLine, so the old question doesn't sit
+        // on screen after the gate itself is gone.
+        closeGate()
         activeScreen = NSScreen.underMouse
         partial = ""
         reply = ""
@@ -367,8 +387,7 @@ final class AppState: ObservableObject {
         // A new turn — talk or agent — supersedes any gate left waiting from a previous
         // one. Confirm bypasses submit() entirely (it calls runAgent directly), so this
         // never clobbers a real answer to the question that's showing.
-        pendingNeed = nil
-        needSession = nil
+        closeGate()
         if !auto { autoSteps = 0 }   // a new question starts a new lesson budget
         if let task = agentTask(from: text) {
             runAgent(task)
@@ -654,75 +673,133 @@ final class AppState: ObservableObject {
     }
 
     /// `resumeSession` is set only by `confirmNeed()`: it reattaches to the paused CLI
-    /// session instead of starting a fresh one, and — since the same long-running form can
-    /// gate more than once — it leaves `needSession` alone rather than overwriting it with
-    /// a value that's already correct.
+    /// session instead of starting a fresh one. A resumed run's own session id (below)
+    /// naturally stays the same one if it gates again — there's no separate slot that
+    /// could ever drift out of sync with it.
     private func runAgent(_ task: String, resumeSession: String? = nil) {
+        // Starting any run — fresh or resumed — abandons whatever gate was showing.
+        // confirmNeed() already niled `gate` before calling in here, so this only ever
+        // does real work for a stale gate left by a different, still-open run.
+        closeGate()
         let session = resumeSession ?? UUID().uuidString
-        if resumeSession == nil { needSession = session }
-        needScanner = NeedScanner()
-        pendingNeed = nil
         agentBusy = true
         agentLine = "🤖 \(task)"
         let displayID = (activeScreen ?? NSScreen.underMouse).displayID
         Task {
             let shotPath = (try? await Capture.screen(excludingSelf: true, displayID: displayID))?.filePath
             var procRef: Process?
+            // This run's own scanner — never shared with a concurrent run, so two agents
+            // in flight can never have their markers cross-wired.
+            var scanner = NeedScanner()
             procRef = AgentRunner.run(
                 backend: agentBackend, task: task, screenshotPath: shotPath,
                 fullAccess: agentFullAccess, appControl: appControl,
                 session: session, resume: resumeSession != nil,
-                onOutput: { [weak self] chunk in Task { @MainActor in self?.agentTick(chunk) } },
+                onOutput: { [weak self] chunk in Task { @MainActor in
+                    guard let self else { return }
+                    // agentTick first: it unconditionally overwrites agentLine with the
+                    // chunk's newest raw line, so it must not run after feedGate — a gate
+                    // opening mid-stream would have its "❓ …" line clobbered right back to
+                    // plain ticker text in the same tick.
+                    self.agentTick(chunk)
+                    self.feedGate(chunk, into: &scanner, session: session, process: procRef)
+                } },
                 onDone: { [weak self] code in Task { @MainActor in
                     guard let self else { return }
-                    // The agent's last line usually has no trailing newline, so a NEED:
-                    // printed right before exit never reached feed()'s line-complete path —
-                    // without this flush the gate silently never opens and the run is
-                    // abandoned mid-form with the notch reading "✅ agent done".
-                    if let late = self.needScanner.flush() { self.pendingNeed = late }
                     self.agentBusy = false
                     if let p = procRef { self.runningAgents.removeAll { $0 === p } }
-                    if let need = self.pendingNeed {
-                        self.agentLine = "❓ \(need)"
-                        if self.voiceReplies { self.voice.speak(need) }
-                        // No agentFade() here: the question stays up until Confirm/Cancel.
-                    } else {
-                        self.agentLine = code == 0 ? "✅ agent done" : "❌ agent exited (\(code))"
-                        self.agentFade()
-                    }
+                    self.finishGate(flushing: &scanner, session: session, exitCode: code)
                 } }
             )
             if let p = procRef { runningAgents.append(p) }
         }
     }
 
-    /// Confirm — reattach to the paused session and let it finish the step it stopped before.
-    func confirmNeed() {
-        guard let session = needSession else { return }
-        pendingNeed = nil
-        runAgent("Confirmed — proceed.", resumeSession: session)
+    /// Opens the gate: one atomic value binding the question to the session that asked it
+    /// and (if the agent hasn't been confirmed exited yet) the process that could still be
+    /// terminated. Sets what the notch shows and speaks the question, whether this fires
+    /// mid-stream (`feedGate`, agent possibly still running) or at exit (`finishGate`,
+    /// catching an unterminated last line).
+    private func openGate(question: String, session: String, process: Process?) {
+        gate = Gate(question: question, session: session, process: process)
+        agentLine = "❓ \(question)"
+        if voiceReplies { voice.speak(question) }
     }
 
-    /// Cancel — the session is abandoned. The browser window stays open; the user takes over.
-    func cancelNeed() {
-        pendingNeed = nil
-        needSession = nil
+    /// Clears the gate, terminating its process first if it's somehow still alive — onDone
+    /// only opens a gate after `AgentRunner` reports the process exited, so this is
+    /// normally a no-op, but a gate opened mid-stream (`feedGate`, before the exit is
+    /// confirmed) can still be live. Every path that already supersedes in-flight work
+    /// (a new run, a new turn, ✕, Start over, Cancel) routes through this, so a paused
+    /// agent is never left running unsupervised in the background, and the stale question
+    /// never survives the gate that showed it.
+    private func closeGate() {
+        gate?.process?.terminate()
+        gate = nil
         agentLine = ""
+        agentFadeTask?.cancel()
+    }
+
+    /// Feeds one chunk into `scanner` and opens the gate the instant a NEED: marker's line
+    /// completes. Not `private`: the self-check calls this directly with synthetic chunks
+    /// and no process, so the real call site — not a reimplementation of it — is what's
+    /// under test.
+    func feedGate(_ chunk: String, into scanner: inout NeedScanner, session: String, process: Process?) {
+        if let need = scanner.feed(chunk) { openGate(question: need, session: session, process: process) }
+    }
+
+    /// Catches an unterminated final line once a run exits — the agent's last line usually
+    /// has none — and reports what the notch shows next. Same testing rationale as
+    /// `feedGate`. Reads `gate?.question` rather than anything scoped to this run, so if a
+    /// different, still-open gate is currently showing (this run never asked one itself,
+    /// or asked and was since superseded), that question is what gets redisplayed — this
+    /// run's own exit never overwrites it with a plain done/error line.
+    @discardableResult
+    func finishGate(flushing scanner: inout NeedScanner, session: String, exitCode: Int32) -> (line: String, fades: Bool) {
+        if let late = scanner.flush() { openGate(question: late, session: session, process: nil) }
+        let outcome = agentOutcome(exitCode: exitCode, need: gate?.question)
+        agentLine = outcome.line
+        if outcome.fades { agentFade() }
+        return outcome
+    }
+
+    /// Confirm — reattach to the paused session and let it finish the step it stopped
+    /// before. Resumes `gate.session`, the session that actually asked — never a
+    /// separately mutable slot a second, unrelated run could have overwritten.
+    func confirmNeed() {
+        guard let g = gate else { return }
+        // Not closeGate(): the process (if any) is about to be superseded by the resume
+        // run's own `-r` invocation, not abandoned — terminating it here would only race
+        // that new process for no benefit.
+        gate = nil
+        runAgent("Confirmed — proceed.", resumeSession: g.session)
+    }
+
+    /// Cancel — the session is abandoned. Terminates the process if it's still running
+    /// (normally a no-op — the gate usually opens only after the agent has already
+    /// exited). The browser window stays open; the user takes over.
+    func cancelNeed() {
+        closeGate()
     }
 
     /// The notch is a ticker, not a terminal: only the newest line of agent output shows.
     private func agentTick(_ chunk: String) {
-        if let need = needScanner.feed(chunk) { pendingNeed = need }
         guard let last = chunk.split(whereSeparator: \.isNewline).last(where: {
             !$0.trimmingCharacters(in: .whitespaces).isEmpty
         }) else { return }
         agentLine = String(last.prefix(120))
     }
 
+    /// Blanks the notch's agent line after a pause — unless a gate has opened since this
+    /// was scheduled, because the question must stay visible until the user answers it,
+    /// not just until agentBusy goes false. Held in a cancellable task, the same way
+    /// `pendingAdvance`/`fadeTask` already are, so a fresh run or a closed gate can
+    /// supersede a stale fade outright rather than letting it blank a live question later.
     private func agentFade() {
-        Task { [weak self] in
+        agentFadeTask?.cancel()
+        agentFadeTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 9_000_000_000)
-            guard let self, !self.agentBusy else { return }
+            guard let self, !Task.isCancelled, !self.agentBusy, self.gate == nil else { return }
             self.agentLine = ""
         }
     }
