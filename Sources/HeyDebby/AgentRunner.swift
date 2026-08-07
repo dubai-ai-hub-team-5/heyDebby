@@ -6,8 +6,10 @@ func shellQuote(_ s: String) -> String {
 
 /// Pure command builder (selfcheck-tested). backend: "codex" or "claude".
 func agentCommand(backend: String, task: String, screenshotPath: String?,
-                  fullAccess: Bool, appControl: Bool) -> String {
+                  fullAccess: Bool, appControl: Bool = false,
+                  session: String? = nil, resume: Bool = false) -> String {
     if backend == "codex" {
+        // `codex exec` has no session-resume equivalent, so session/resume are ignored here.
         var cmd = "codex exec --skip-git-repo-check"
         if let p = screenshotPath { cmd += " -i \(shellQuote(p))" }
         cmd += fullAccess ? " --dangerously-bypass-approvals-and-sandbox" : " -s read-only"
@@ -17,8 +19,13 @@ func agentCommand(backend: String, task: String, screenshotPath: String?,
     if let p = screenshotPath {
         prompt += "\n\n(Context: a screenshot of my screen from when I asked this is at \(p) — read it if visual context helps.)"
     }
+    // `-r <id>` reattaches to the paused run; `--session-id <id>` names a fresh one so we
+    // can reattach later without parsing a session id back out of the CLI's output (which
+    // would force --output-format json and break the streaming ticker the notch relies on).
+    var sessionFlag = ""
+    if let s = session { sessionFlag = resume ? " -r \(s)" : " --session-id \(s)" }
     if fullAccess {
-        return "claude -p --dangerously-skip-permissions \(shellQuote(prompt))"
+        return "claude -p\(sessionFlag) --dangerously-skip-permissions \(shellQuote(prompt))"
     }
     // Without an allowlist `claude -p` denies every tool, so an app task fails silently.
     // --allowedTools is variadic: it must be last, and the prompt must precede it.
@@ -29,7 +36,7 @@ func agentCommand(backend: String, task: String, screenshotPath: String?,
     // Settings means off here too, not a second door that skips the toggle.
     var tools = "mcp__composio Read Glob Grep"
     if appControl { tools += " Bash(osascript:*)" }
-    return "claude -p \(shellQuote(prompt)) --allowedTools \(tools)"
+    return "claude -p\(sessionFlag) \(shellQuote(prompt)) --allowedTools \(tools)"
 }
 
 // Both CLIs have the Composio MCP gateway registered (connect.composio.dev) —

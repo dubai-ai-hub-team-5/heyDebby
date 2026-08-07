@@ -402,6 +402,30 @@ func runSelfCheck() {
     assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false, appControl: true)
             .contains("osascript"), "codex agents are unaffected")
 
+    // --- agent session id / resume ---
+    let uuid = "0F8E4B10-3C2A-4D5E-9F01-2A3B4C5D6E7F"
+    let first = agentCommand(backend: "claude", task: "renew my passport",
+                             screenshotPath: nil, fullAccess: false, session: uuid)
+    assert(first.contains("--session-id \(uuid)"), "first run must pin the session: \(first)")
+    assert(!first.contains("--resume"), "the first run resumes nothing")
+    assert(first.range(of: "--allowedTools")!.lowerBound
+           > first.range(of: "'renew my passport'")!.lowerBound,
+           "--allowedTools is variadic and must stay after the prompt")
+
+    let again = agentCommand(backend: "claude", task: "Confirmed — proceed.",
+                             screenshotPath: nil, fullAccess: false,
+                             session: uuid, resume: true)
+    assert(again.contains("-r \(uuid)"), "the resume run must reattach: \(again)")
+    assert(!again.contains("--session-id"), "resume replaces --session-id, never both")
+    assert(again.range(of: "--allowedTools")!.lowerBound
+           > again.range(of: "'Confirmed")!.lowerBound,
+           "--allowedTools stays last on resume too")
+
+    // codex has no equivalent; it must be untouched by either flag.
+    let cxSession = agentCommand(backend: "codex", task: "hi", screenshotPath: nil,
+                          fullAccess: false, session: uuid)
+    assert(!cxSession.contains(uuid), "codex takes no session id: \(cxSession)")
+
     // The marker is documented only when the feature is on. A model told about a marker
     // the app will drop announces actions that never happen.
     assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("RUN:"),
