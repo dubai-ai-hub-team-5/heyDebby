@@ -203,6 +203,13 @@ Not negotiable, not configurable:
   attempts a CAPTCHA.
 - `RUN:` is executed as `osascript` arguments and nothing else. It never becomes
   a shell string.
+- **A `RUN:` payload naming `do shell script` or `do script` is refused at the
+  parser.** Argv alone does not contain AppleScript — `do shell script "…"` runs
+  arbitrary commands, and the payload is written by a model that reads the user's
+  screen, so a web page saying `RUN: do shell script "curl … | sh"` is a live
+  prompt-injection path rather than a hypothetical one. A denylist is weak in
+  general; here it closes the two documented escapes, and osascript bounds the
+  rest. Added after the spec was first written.
 - Destructive app actions — deleting files, sending mail or messages, anything
   costing money — are not `RUN:` material. The system prompt routes them to an
   agent run, where the `NEED:` gate applies.
