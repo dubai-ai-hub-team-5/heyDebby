@@ -564,7 +564,7 @@ struct NotchView: View {
                 control("pencil.tip", drawing.isActive ? "Stop drawing" : "Draw on screen",
                         tint: drawing.isActive ? .orange : .white) { state.toggleDrawing() }
                 control("square.and.pencil", "Start over") { state.newChat() }
-                control("gearshape", "Settings") { SettingsWindow.show() }
+                control("gearshape", "Settings") { SettingsWindow.show(state) }
                 control("xmark.circle.fill", "End session") { state.dismiss() }
             }
         }
@@ -616,14 +616,14 @@ struct Waveform: View {
 enum SettingsWindow {
     private static var window: NSWindow?
 
-    static func show() {
+    static func show(_ state: AppState) {
         if window == nil {
             let w = NSWindow(contentRect: .zero, styleMask: [.titled, .closable],
                              backing: .buffered, defer: false)
             w.title = "HeyDebby Settings"
             w.isReleasedWhenClosed = false   // reopening must not resurrect a freed window
             w.level = .floating
-            let host = NSHostingView(rootView: SettingsView())
+            let host = NSHostingView(rootView: SettingsView().environmentObject(state))
             w.contentView = host
             w.setContentSize(host.fittingSize)
             w.center()
@@ -793,6 +793,59 @@ struct ComposioSection: View {
     }
 }
 
+/// Documents scan: a one-time read of the user's own files (name, passport, address…)
+/// into profile.json, for the form-filling agent to consult without re-scanning every time.
+struct ProfileSection: View {
+    @EnvironmentObject var state: AppState
+    @AppStorage("docsFolder") private var docsFolder = ""
+
+    private var lastScannedLabel: String {
+        guard let d = Profile.lastScanned else { return "Never" }
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f.string(from: d)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Your documents").font(.headline)
+            HStack(spacing: 6) {
+                Text(docsFolder.isEmpty ? "~/Documents, ~/Desktop, ~/Downloads" : docsFolder)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                Button("Choose…", action: chooseFolder).controlSize(.small)
+            }
+            .frame(width: 260)
+            HStack(spacing: 8) {
+                Button("Scan now") { state.scanDocuments() }
+                    .controlSize(.small).disabled(state.agentBusy)
+                if state.agentBusy { ProgressView().controlSize(.mini) }
+                Spacer(minLength: 4)
+                Button("Delete profile") { Profile.delete() }
+                    .controlSize(.small)
+            }
+            .frame(width: 260)
+            Text("Last scanned \(lastScannedLabel)")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Saved to Application Support, readable only by you. It holds real "
+                 + "ID numbers — delete it any time.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(width: 260, alignment: .leading)
+        }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        docsFolder = url.path
+    }
+}
+
 struct SettingsView: View {
     @AppStorage("backend") private var backend = ""
     @AppStorage("apiKey") private var apiKey = ""
@@ -910,6 +963,8 @@ struct SettingsView: View {
                 .frame(width: 260, alignment: .leading)
             Divider()
             ComposioSection()
+            Divider()
+            ProfileSection()
         }
         .frame(width: 280)
     }

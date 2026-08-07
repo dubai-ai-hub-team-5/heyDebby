@@ -668,6 +668,18 @@ func runSelfCheck() {
         for _ in 0..<100 where sleepy.isRunning { usleep(20_000) }
         assert(!sleepy.isRunning, "Cancel must terminate a gate's still-running process, not just forget it")
     }
+
+    // --- Profile: pulling JSON out of a model's answer ---
+    assert(Profile.extractJSON("```json\n{\"a\":1}\n```") == "{\"a\":1}",
+           "markdown fences must come off")
+    assert(Profile.extractJSON("Here you go:\n{\"a\":1}\nhope that helps") == "{\"a\":1}",
+           "prose either side must come off")
+    assert(Profile.extractJSON("{\"a\":{\"b\":2}}") == "{\"a\":{\"b\":2}}",
+           "nested braces must survive")
+    assert(Profile.extractJSON("no json here") == nil, "garbage yields nil, not a guess")
+    assert(Profile.extractJSON("{not valid json}") == nil,
+           "syntactically invalid JSON must be rejected, not written to disk")
+    assert(Profile.extractJSON("") == nil, "empty output yields nil")
 }
 
 if CommandLine.arguments.contains("--selfcheck") {
@@ -693,8 +705,11 @@ if let i = CommandLine.arguments.firstIndex(of: "--notchcheck") {
         print("open \(notchRect(screen: s.frame, collapsed: s.collapsedNotch, expanded: true))")
         guard CommandLine.arguments.count > i + 1 else { return }
         // Settings is its own window sized from fittingSize — a zero size here means a broken window.
-        print("settings fits \(NSHostingView(rootView: SettingsView()).fittingSize)")
-        if let png = ImageRenderer(content: SettingsView().background(Color(white: 0.92))).nsImage?
+        // SettingsView reads AppState (for the docs-scan row) via environmentObject; a throwaway
+        // instance is fine here since this is only a layout/rendering check, not real behavior.
+        print("settings fits \(NSHostingView(rootView: SettingsView().environmentObject(AppState())).fittingSize)")
+        if let png = ImageRenderer(content: SettingsView().environmentObject(AppState())
+            .background(Color(white: 0.92))).nsImage?
             .tiffRepresentation.flatMap({ NSBitmapImageRep(data: $0) })?.representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1] + ".settings.png"))
         }

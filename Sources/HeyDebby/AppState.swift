@@ -145,6 +145,7 @@ final class AppState: ObservableObject {
     var agentFullAccess: Bool { UserDefaults.standard.bool(forKey: "agentFullAccess") }
     var appControl: Bool { UserDefaults.standard.bool(forKey: "appControl") }
     var backend: String { resolveBackend(UserDefaults.standard.string(forKey: "backend") ?? "") }
+    var docsFolder: String { UserDefaults.standard.string(forKey: "docsFolder") ?? "" }
 
     /// Agents exist mostly to touch your apps, and `codex exec` auto-denies every
     /// Composio write ("user cancelled MCP tool call") — so agents use claude when
@@ -713,6 +714,56 @@ final class AppState: ObservableObject {
             )
             if let p = procRef { runningAgents.append(p) }
         }
+    }
+
+    /// One agent run that reads the user's documents and prints JSON. It goes through
+    /// AgentRunner.spawn rather than the one-shot shellOutput helper because a scan of a
+    /// documents folder runs for minutes, and a notch with no ticker looks hung.
+    ///
+    /// The agent is never granted Write: it prints, Swift writes the file.
+    func scanDocuments() {
+        let folders = docsFolder.isEmpty
+            ? "~/Documents, ~/Desktop and ~/Downloads"
+            : docsFolder
+        let prompt = """
+        Read the documents in \(folders) and extract the personal details a form would ask \
+        for — full name, date of birth, passport number and expiry, driving licence, \
+        national insurance or social security number, address, phone, email. \
+        Print ONE JSON object and nothing else, shaped like \
+        {"passport_number":{"value":"K1234567","source":"~/Documents/passport.pdf"}}. \
+        Use snake_case keys. Omit anything you cannot find — never guess a value. \
+        Do not write any files.
+        """
+        agentBusy = true
+        agentLine = "📇 reading your documents…"
+        // onOutput lands on the pipe's queue and onDone on the termination queue —
+        // different threads, exactly what OutputBox (see AgentRunner.swift) exists for.
+        // A bare captured `var` here would race the two, same hazard shellOutput avoids.
+        let out = OutputBox()
+        AgentRunner.spawn(cliPathPrefix + "claude -p \(shellQuote(prompt)) "
+                          + "--allowedTools Read Glob Grep",
+                          onOutput: { [weak self] chunk in
+                              out.append(chunk)
+                              Task { @MainActor in self?.agentTick(chunk) }
+                          },
+                          onDone: { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.agentBusy = false
+                guard let json = Profile.extractJSON(out.text) else {
+                    self.agentLine = "❌ couldn't read your documents"
+                    self.agentFade()
+                    return
+                }
+                do {
+                    try Profile.write(json)
+                    self.agentLine = "✅ profile saved"
+                } catch {
+                    self.agentLine = "❌ \(error.localizedDescription)"
+                }
+                self.agentFade()
+            }
+        })
     }
 
     /// Opens the gate: one atomic value binding the question to the session that asked it
