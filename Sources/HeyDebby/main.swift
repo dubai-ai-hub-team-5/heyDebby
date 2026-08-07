@@ -406,8 +406,8 @@ func runSelfCheck() {
     let uuid = "0F8E4B10-3C2A-4D5E-9F01-2A3B4C5D6E7F"
     let first = agentCommand(backend: "claude", task: "renew my passport",
                              screenshotPath: nil, fullAccess: false, session: uuid)
-    assert(first.contains("--session-id \(uuid)"), "first run must pin the session: \(first)")
-    assert(!first.contains("--resume"), "the first run resumes nothing")
+    assert(first.contains("--session-id \(shellQuote(uuid))"), "first run must pin the session: \(first)")
+    assert(!first.contains("-r \(shellQuote(uuid))"), "the first run resumes nothing: \(first)")
     assert(first.range(of: "--allowedTools")!.lowerBound
            > first.range(of: "'renew my passport'")!.lowerBound,
            "--allowedTools is variadic and must stay after the prompt")
@@ -415,7 +415,7 @@ func runSelfCheck() {
     let again = agentCommand(backend: "claude", task: "Confirmed — proceed.",
                              screenshotPath: nil, fullAccess: false,
                              session: uuid, resume: true)
-    assert(again.contains("-r \(uuid)"), "the resume run must reattach: \(again)")
+    assert(again.contains("-r \(shellQuote(uuid))"), "the resume run must reattach: \(again)")
     assert(!again.contains("--session-id"), "resume replaces --session-id, never both")
     assert(again.range(of: "--allowedTools")!.lowerBound
            > again.range(of: "'Confirmed")!.lowerBound,
@@ -425,6 +425,13 @@ func runSelfCheck() {
     let cxSession = agentCommand(backend: "codex", task: "hi", screenshotPath: nil,
                           fullAccess: false, session: uuid)
     assert(!cxSession.contains(uuid), "codex takes no session id: \(cxSession)")
+
+    // Full access returns early and never reaches --allowedTools, but it must still pin
+    // the session — this branch had no coverage at all before this fix.
+    let fullSess = agentCommand(backend: "claude", task: "hi", screenshotPath: nil,
+                                fullAccess: true, appControl: false, session: uuid)
+    assert(fullSess.contains("--session-id"), "full access still pins the session: \(fullSess)")
+    assert(!fullSess.contains("--allowedTools"), "full access grants everything; no allowlist")
 
     // The marker is documented only when the feature is on. A model told about a marker
     // the app will drop announces actions that never happen.

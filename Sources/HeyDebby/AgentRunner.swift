@@ -23,7 +23,7 @@ func agentCommand(backend: String, task: String, screenshotPath: String?,
     // can reattach later without parsing a session id back out of the CLI's output (which
     // would force --output-format json and break the streaming ticker the notch relies on).
     var sessionFlag = ""
-    if let s = session { sessionFlag = resume ? " -r \(s)" : " --session-id \(s)" }
+    if let s = session { sessionFlag = resume ? " -r \(shellQuote(s))" : " --session-id \(shellQuote(s))" }
     if fullAccess {
         return "claude -p\(sessionFlag) --dangerously-skip-permissions \(shellQuote(prompt))"
     }
