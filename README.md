@@ -1,13 +1,14 @@
-# HeyDebby 👆
+<p align="center">
+  <img src="assets/debby-icon.png" alt="HeyDebby" width="160" height="160">
+</p>
 
-A clone of [HeyClicky](https://heyclicky.com) — "an AI buddy that lives on your Mac."
-Native Swift, zero dependencies. It lives **in the notch** — hold **⌃⌥** and talk
-about what's on your screen, it answers out loud and points at things. Say
-**"agent …"** and it spins up a background agent. No chat window, no typing.
+<h1 align="center">HeyDebby 👆</h1>
 
-## Features (vs. the original)
+<p align="center">An AI buddy that lives in your Mac's notch — hold ⌃⌥ and talk about what's on your screen; she answers out loud and points at things. Native Swift, zero dependencies.</p>
 
-| HeyClicky | This clone |
+## Features
+
+| Feature | How it works |
 |---|---|
 | Hotkey activation | **⌃⌥ hold-to-talk** — hold to dictate, release to send; quick-tap latches on and silence sends |
 | Sees your screen | Fresh screenshot per question via ScreenCaptureKit |
@@ -64,10 +65,10 @@ Agents follow the same choice: Codex agents run `codex exec` (read-only sandbox
 by default; the *full access* toggle uses `--dangerously-bypass-approvals-and-sandbox`),
 Claude agents run `claude -p` (toggle adds `--dangerously-skip-permissions`).
 
-## Beyond the clone
+## Beyond the basics
 
-Things Debby does that the original doesn't. Architecture and rationale for all of
-it are in [TECH-SPEC.md](./TECH-SPEC.md).
+The features that make Debby more than a screen reader. Architecture and rationale
+for all of it are in [TECH-SPEC.md](./TECH-SPEC.md).
 
 - **Live web data (context.dev).** Debby answers about your screen, but the screen
   points at the live web — prices, docs, availability — that changes by the minute.

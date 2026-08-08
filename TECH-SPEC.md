@@ -129,36 +129,42 @@ Who talks to context.dev, and when — the two passes of the `FETCH:` loop
 (`Context.swift` is the only thing that ever touches the API):
 
 ```
-┌── PASS 1 · FETCH (get the live data) ─────────────────────────────────────────┐
-│                                                                                │
-│   USER ──⌃⌥ "is this cheaper anywhere?" + screenshot──▶  AppState             │
-│                                                          (Context.swift)       │
-│                                          ① prompt + shot │                     │
-│                                                          ▼                     │
-│                                                        BRAIN (LLM)             │
-│                              ② reply is ONLY a marker,   │                     │
-│                                 no prose:                ▼                     │
-│                                 "FETCH: <url>"         AppState ──③ HTTPS──┐    │
-│                                 "FETCH: search: <q>"                       │    │
-│                                                                           ▼    │
-│    ┌─────────────────────────────────────────────────────────────────────┐   │
-│    │  context.dev            base:  https://api.context.dev/v1             │   │
-│    │  (third-party web       auth:  Authorization: Bearer <CONTEXT_API_KEY>│   │
-│    │   context API)          ─────────────────────────────────────────────│   │
-│    │   • GET  /web/scrape/markdown?url=<page>   ─▶  clean, LLM-ready MD     │   │
-│    │   • POST /web/search      { "query": … }   ─▶  ranked results + snips  │   │
-│    └─────────────────────────────────┬───────────────────────────────────┘   │
-│                                       │ ④ live web data — the page as it is    │
-│                                       ▼    *now* — folded back into the prompt  │
-│                                     AppState                                    │
-└────────────────────────────────────────────────────────────────────────────────┘
-┌── PASS 2 · ANSWER (from the live data, ≤ 2 rounds total) ──────────────────────┐
-│                                                                                │
-│   AppState ──⑤ question + live data, "answer & cite the source"──▶ BRAIN (LLM) │
-│                                                                        │       │
-│   USER ◀──⑦ TTS + on-screen overlay──  AppState ◀──⑥ answer, cites src─┘       │
-│                                                                                │
-└────────────────────────────────────────────────────────────────────────────────┘
+PASS 1 - FETCH: get the live data
+---------------------------------
+
+  USER --( hold Ctrl+Alt, "is this cheaper anywhere?" + screenshot )--> AppState
+                                                                        (Context.swift)
+                                                    (1) prompt + shot |
+                                                                      v
+                                                                    BRAIN (LLM)
+        (2) reply is ONLY a marker, no prose:                         |
+              FETCH: <url>                                            v
+              FETCH: search: <query>                              AppState
+                                                                      |
+                                                        (3) HTTPS     |
+                                                                      v
+  +---------------------------------------------------------------------------+
+  |  context.dev      (third-party web-context API)                           |
+  |                                                                           |
+  |  base:  https://api.context.dev/v1                                        |
+  |  auth:  Authorization: Bearer <CONTEXT_API_KEY>                           |
+  |                                                                           |
+  |  GET  /web/scrape/markdown?url=<page>   -->  clean, LLM-ready Markdown    |
+  |  POST /web/search      { "query": ... } -->  ranked results + snippets    |
+  +---------------------------------------------------------------------------+
+                                    |
+                     (4) live web data - the page as it is *now* -
+                                    |   folded back into the prompt
+                                    v
+                                 AppState
+
+
+PASS 2 - ANSWER: from the live data  (<= 2 rounds total)
+-------------------------------------------------------
+
+  AppState --( (5) question + live data: "answer & cite the source" )--> BRAIN (LLM)
+                                                                            |
+  USER <--( (7) TTS + on-screen overlay )--  AppState  <--( (6) answer )----+
 ```
 
 This is what makes "changes mid-conversation" literal: every turn can fetch the page
