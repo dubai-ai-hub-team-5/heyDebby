@@ -18,6 +18,9 @@ enum Beat: Equatable {
 /// so in this format a line already is a sentence; there is no gain in releasing mid-line.
 struct BeatSplitter {
     private(set) var more = false
+    /// Live-web-data requests the model asked for (`FETCH:` lines). Not a beat: nothing is
+    /// spoken or drawn — `AppState` fetches each, then re-asks the model with the results.
+    private(set) var fetches: [String] = []
 
     private var line = ""    // characters since the last newline
     private var prose = ""   // prose accumulating toward a sentence end
@@ -81,6 +84,12 @@ struct BeatSplitter {
             } else {
                 out.append(.run(script))
             }
+            return out
+        }
+        if let target = Self.payload(l, "FETCH:") {
+            let out = flushProse()   // the sentence before a marker is finished by it
+            if target.isEmpty { DebbyLog.write("BEAT FETCH: empty payload") }
+            else { fetches.append(target) }
             return out
         }
         if let rest = Self.payload(l, "MORE:") {

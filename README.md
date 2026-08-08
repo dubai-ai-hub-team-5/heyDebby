@@ -12,7 +12,8 @@ about what's on your screen, it answers out loud and points at things. Say
 | Hotkey activation | **⌃⌥ hold-to-talk** — hold to dictate, release to send; quick-tap latches on and silence sends |
 | Sees your screen | Fresh screenshot per question via ScreenCaptureKit |
 | Talk mode (voice) | Live speech-to-text, auto-sends after 1.6s of silence |
-| Speaks answers | Native TTS (best installed English voice) |
+| Speaks answers | Native TTS by default, or **ElevenLabs** voices (⚙︎ → Voice engine) |
+| Live web data | Pulls current prices/news/pages on demand via **context.dev** — see below |
 | Screen drawing | Pulsing orange pointers + labels drawn on a click-through overlay, auto-hide in 8s |
 | Background agents | "agent: clean my downloads" → runs Codex CLI (`codex exec`) or [Claude Code](https://claude.com/claude-code) (`claude -p`) in the background; the newest output line tickers in the notch |
 | Sits next to cursor | A 👆 companion pointer trails your cursor and glides to each marked spot to draw the highlight — **while you talk it turns into a 5-bar audio visualiser**, same spot, same size |
@@ -62,9 +63,21 @@ Claude agents run `claude -p` (toggle adds `--dangerously-skip-permissions`).
 
 ## Beyond the clone
 
-Three things Debby does that the original doesn't. Architecture and rationale for
-all of it are in [TECH-SPEC.md](./TECH-SPEC.md).
+Things Debby does that the original doesn't. Architecture and rationale for all of
+it are in [TECH-SPEC.md](./TECH-SPEC.md).
 
+- **Live web data (context.dev).** Debby answers about your screen, but the screen
+  points at the live web — prices, docs, availability — that changes by the minute.
+  When the honest answer needs something current, she emits a `FETCH:` for a URL or a
+  search; Swift pulls it from [context.dev](https://context.dev) (scrape-to-Markdown
+  or web search), folds the fresh result back into the turn, and answers from it —
+  citing the source. So *"is this cheaper anywhere else?"* is answered from the web as
+  it is right now, not from training data. On behind a context.dev key (⚙︎ → Live web
+  data, or `CONTEXT_API_KEY`).
+- **Natural voice (ElevenLabs).** Switch ⚙︎ → Voice engine to **ElevenLabs** for
+  streamed, natural speech (default voice *Sarah*, any Voice ID works). Any failure
+  falls straight back to the native macOS voice, so Debby never goes silent. Key in
+  settings or `ELEVENLABS_API_KEY`.
 - **Realtime lessons — draw while talking.** With the OpenAI brain, replies stream:
   Debby starts speaking in ~1s and each shape appears *as* she narrates it (a queue
   keeps the drawing in step with the voice), instead of drawing everything up front.
@@ -101,7 +114,7 @@ First-run setup (configure):
 2. macOS will prompt for **Microphone** and **Speech Recognition** — allow both.
 3. **Accessibility** — a modifier-only chord like ⌃⌥ can't be a Carbon hot key, so it's read from the global event stream. Grant it in System Settings → Privacy & Security → Accessibility, then relaunch.
 4. First screen question: grant **Screen Recording** too, then relaunch (macOS requires it).
-5. Optional toggles in **⚙︎**: *Let Debby control apps* (Automation), *Enable browser control* (needs the `claude` CLI + `npx`), and scanning your documents for form-filling.
+5. Optional in **⚙︎**: paste a **context.dev** key for live web data, switch **Voice engine** to ElevenLabs, enable *Let Debby control apps* (Automation) or *browser control* (needs the `claude` CLI + `npx`), and scan your documents for form-filling.
 
 ## Usage
 
@@ -121,6 +134,8 @@ First-run setup (configure):
   **or** an Anthropic / Google / OpenAI API key
 - Node.js (`npx`) — only for the MCP features: Composio app integrations and
   browser control (form filling)
+- Optional: a **context.dev** key for live web data, an **ElevenLabs** key for its
+  voices (both have free tiers; both fall back gracefully when unset)
 
 ## App integrations (Composio)
 
@@ -164,4 +179,7 @@ a configurable hotkey, a notch per display, Windows. Add when the need is real.
 
 `./build.sh` runs `--selfcheck` (assertions are compiled out of release builds, so
 it runs the debug binary). `--notchcheck [out.png]` prints the notch geometry this
-Mac measured and renders the HUD offscreen to eyeball it.
+Mac measured and renders the HUD offscreen to eyeball it. Headless link checks, each
+reading keys the way the app does: `--chat-check` (the full live-web-data turn:
+model → `FETCH:` → context.dev → answer), `--context-check` (`DEBBY_FETCH=<url|query>`),
+`--eleven-check`, `--codex-check`, `--gemini-check`.

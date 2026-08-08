@@ -44,6 +44,7 @@ struct ParsedReply {
     var beats: [Beat] = []
     var text = ""      // what gets shown in the notch: every spoken sentence, joined
     var more = false   // the model says this lesson has another step
+    var fetches: [String] = []   // live-web-data requests (FETCH:), for AppState to fetch
 }
 
 extension ParsedReply {
@@ -64,6 +65,7 @@ func parseReply(_ text: String) -> ParsedReply {
     var out = ParsedReply()
     out.beats = sp.feed(text) + sp.finish()
     out.more = sp.more
+    out.fetches = sp.fetches
     out.text = out.beats
         .compactMap { if case .say(let s) = $0 { return s } else { return nil } }
         .joined(separator: " ")
@@ -80,13 +82,20 @@ nonisolated(unsafe) var debbyScreenAspect: Double = 16.0 / 10.0
 /// never happen.
 nonisolated(unsafe) var debbyAppControl = false
 
-enum Claude {
-    static var systemPrompt: String { promptTemplate(aspect: debbyScreenAspect, appControl: debbyAppControl) }
+/// Set from AppState before each request, true when a context.dev key is configured. The
+/// FETCH: documentation is omitted otherwise — same reason as RUN:: a model told it can
+/// pull live data when it can't would promise data it never gets.
+nonisolated(unsafe) var debbyWebData = false
 
-    static func promptTemplate(aspect: Double, appControl: Bool = false) -> String {
+enum Claude {
+    static var systemPrompt: String {
+        promptTemplate(aspect: debbyScreenAspect, appControl: debbyAppControl, webData: debbyWebData)
+    }
+
+    static func promptTemplate(aspect: Double, appControl: Bool = false, webData: Bool = false) -> String {
         let a = String(format: "%.2f", aspect)
-        return basePromptPart1 + (appControl ? runPrompt : "") + basePromptPart2
-            + (appControl ? agentPromptRunOn : agentPrompt) + """
+        return basePromptPart1 + (appControl ? runPrompt : "") + (webData ? fetchPrompt : "")
+            + basePromptPart2 + (appControl ? agentPromptRunOn : agentPrompt) + """
 
 
         Geometry: the screen is \(a)× wider than it is tall, and x and y are fractions of their \
@@ -191,6 +200,22 @@ enum Claude {
     messages, or spend money. For anything destructive or multi-step, tell the user to \
     start it with "agent" instead — that's the right place for it, since the user asked for \
     it explicitly and can watch it run.
+    """
+
+    /// Assembled into the prompt only when a context.dev key is configured (see `debbyWebData`).
+    private static let fetchPrompt = """
+
+
+    You can pull LIVE data from the web, fetched the instant you ask — current prices, \
+    news, availability, documentation, anything that changes. To fetch, put a line of its own:
+    FETCH: https://www.apple.com/shop/buy-mac/macbook-air
+    FETCH: search: cheapest MacBook Air M3 in stock today
+    A line beginning http(s):// (or a bare domain like apple.com) scrapes that exact page; \
+    `search:` runs a web search. When you need live data, reply with ONLY the FETCH line(s) \
+    and NOTHING else — no answer, no drawing yet. You will immediately be given the results \
+    and can then answer using them. Use this whenever the honest answer depends on something \
+    current, or on a page the user is looking at — do not guess from memory when you could \
+    check. After the data arrives, answer normally and say where it came from.
     """
 
     private static let basePromptPart2 = """

@@ -193,6 +193,41 @@ func runSelfCheck() {
     assert(crlfProse == [.say("First sentence."), .say("Second sentence.")],
            "CRLF between sentences must not glue them together: \(crlfProse)")
 
+    // --- FETCH: live web data via context.dev ---
+    // A FETCH line is not a beat: nothing is spoken or drawn for it. It is collected so
+    // AppState can fetch it and re-ask. Same chunk-boundary hazard as every other marker.
+    let fq = parseReply("Let me check that live.\nFETCH: https://www.apple.com/macbook-air/")
+    assert(fq.fetches == ["https://www.apple.com/macbook-air/"], "FETCH must be captured: \(fq.fetches)")
+    assert(fq.text == "Let me check that live.", "a FETCH line must not be spoken: \(fq.text)")
+    assert(!fq.beats.contains { $0 == .say("FETCH: https://www.apple.com/macbook-air/") },
+           "FETCH must never become a spoken beat")
+    let fq2 = parseReply("FETCH: search: cheapest MacBook Air today\nMORE: no")
+    assert(fq2.fetches == ["search: cheapest MacBook Air today"] && fq2.text.isEmpty,
+           "a fetch-only reply carries the request and nothing to speak: \(fq2)")
+    assert(parseReply("Just answering from what I see.").fetches.isEmpty, "no marker, no fetch")
+    // The bug every marker in this parser must not have: a chunk boundary through the word.
+    func splitFetch(_ chunks: [String]) -> [String] {
+        var s = BeatSplitter(); for c in chunks { _ = s.feed(c) }; _ = s.finish(); return s.fetches
+    }
+    assert(splitFetch(["Checking.\nFET", "CH: https://x.com/p\n"]) == ["https://x.com/p"],
+           "a FETCH marker split across chunks must still be found")
+
+    // --- ContextDev.parseRequest: URL vs. search query, pure and offline ---
+    assert(ContextDev.parseRequest("https://apple.com/x") == .scrape("https://apple.com/x"),
+           "an absolute URL is scraped as-is")
+    assert(ContextDev.parseRequest("www.apple.com") == .scrape("https://www.apple.com"),
+           "a www. host gets a scheme and is scraped")
+    assert(ContextDev.parseRequest("apple.com") == .scrape("https://apple.com"),
+           "a bare domain is scraped")
+    assert(ContextDev.parseRequest("gov.uk/renew-passport") == .scrape("https://gov.uk/renew-passport"),
+           "a bare domain with a path is scraped")
+    assert(ContextDev.parseRequest("search: cheapest macbook air") == .search("cheapest macbook air"),
+           "an explicit search: prefix forces a query")
+    assert(ContextDev.parseRequest("what is the price of a MacBook Air") == .search("what is the price of a MacBook Air"),
+           "prose with spaces is a query, not a URL")
+    assert(ContextDev.parseRequest("3.14") == .search("3.14"),
+           "a decimal is not a domain — no alphabetic TLD")
+
     // --- Control: argv, not a shell string ---
     // The executable is the branch's headline security property: swapping it for
     // /bin/zsh with a joined command string would keep every `arguments` assertion below
@@ -842,6 +877,101 @@ if CommandLine.arguments.contains("--gemini-check") {
             }
         }
     }
+    exit(0)
+}
+
+// Headless check of the context.dev live-web-data link: prints the fetched block.
+// `DEBBY_FETCH` is a URL or a search query, exactly as a FETCH: marker's payload.
+if CommandLine.arguments.contains("--context-check") {
+    let sem = DispatchSemaphore(value: 0)
+    Task.detached {
+        let env = ProcessInfo.processInfo.environment
+        let stored = UserDefaults.standard.string(forKey: "contextApiKey") ?? ""
+        let key = stored.isEmpty ? (env["CONTEXT_API_KEY"] ?? "") : stored
+        guard !key.isEmpty else { print("ERR: no context.dev key (settings or CONTEXT_API_KEY)"); sem.signal(); return }
+        let req = env["DEBBY_FETCH"] ?? "https://example.com"
+        print("--- request: \(req) → \(ContextDev.parseRequest(req)) ---")
+        do { print(try await ContextDev.fetch(req, apiKey: key)) }
+        catch { print("ERR: \(error.localizedDescription)") }
+        sem.signal()
+    }
+    sem.wait()
+    exit(0)
+}
+
+// Headless check of the ElevenLabs voice link: writes the MP3 and prints its size.
+// The key is read where the app reads it and never printed.
+if CommandLine.arguments.contains("--eleven-check") {
+    let sem = DispatchSemaphore(value: 0)
+    Task.detached {
+        let key = SpeechOutput.elevenKey()
+        guard !key.isEmpty else { print("ERR: no ElevenLabs key (settings or ELEVENLABS_API_KEY)"); sem.signal(); return }
+        let env = ProcessInfo.processInfo.environment
+        do {
+            let data = try await Eleven.tts(apiKey: key, voiceID: env["DEBBY_VOICE"] ?? "",
+                                            model: "", text: env["DEBBY_TEXT"] ?? "Hi, I'm Debby. What are you looking at?")
+            let out = env["DEBBY_OUT"] ?? NSTemporaryDirectory() + "debby-eleven.mp3"
+            try data.write(to: URL(fileURLWithPath: out))
+            print("wrote \(out) (\(data.count) bytes)")
+        } catch {
+            print("ERR: \(error.localizedDescription)")
+        }
+        sem.signal()
+    }
+    sem.wait()
+    exit(0)
+}
+
+// Headless check of the whole live-web-data turn: the model sees the FETCH: marker, asks
+// for data, context.dev serves it, the model answers with it. Proves the pitch's Q2/Q3
+// path without the notch, a screenshot or the mic. Uses the claude CLI brain by default.
+if CommandLine.arguments.contains("--chat-check") {
+    let sem = DispatchSemaphore(value: 0)
+    Task.detached {
+        let env = ProcessInfo.processInfo.environment
+        let ctxStored = UserDefaults.standard.string(forKey: "contextApiKey") ?? ""
+        let ctxKey = ctxStored.isEmpty ? (env["CONTEXT_API_KEY"] ?? "") : ctxStored
+        debbyWebData = !ctxKey.isEmpty      // gate FETCH: on a real key, exactly like the app
+        debbyAppControl = false
+        let brain = env["DEBBY_BRAIN"] ?? (Claude.CLI.isLoggedIn ? "claudecli" : "codex")
+        let question = env["DEBBY_PROMPT"] ?? "What is the current starting price of the MacBook Air on apple.com?"
+        print("--- brain: \(brain), webData: \(debbyWebData) ---")
+        func call(_ t: String) async throws -> String {
+            switch brain {
+            case "gemini":
+                let s = UserDefaults.standard.string(forKey: "geminiApiKey") ?? ""
+                let k = s.isEmpty ? (env["GOOGLE_API_KEY"] ?? env["GEMINI_API_KEY"] ?? "") : s
+                return try await Gemini.send(apiKey: k, model: "", history: [], userText: t, imageB64: "")
+            case "codex":
+                return try await Codex.send(model: Codex.defaultModel, history: [], userText: t, imageB64: nil)
+            default:
+                return try await Claude.CLI.send(history: [], userText: t, imagePath: nil)
+            }
+        }
+        do {
+            var text = question
+            for round in 0...2 {
+                let reply = try await call(text)
+                print("\n--- turn \(round + 1) reply ---\n\(reply)")
+                let fetches = parseReply(reply).fetches
+                guard debbyWebData, !ctxKey.isEmpty, !fetches.isEmpty, round < 2 else {
+                    print("\n--- FINAL ANSWER (spoken) ---\n\(parseReply(reply).text)")
+                    break
+                }
+                var data = ""
+                for f in fetches.prefix(3) {
+                    print("… fetching via context.dev: \(f)")
+                    data += "\n\n" + ((try? await ContextDev.fetch(f, apiKey: ctxKey)) ?? "[fetch failed]")
+                }
+                text = question + "\n\n[LIVE WEB DATA — fetched just now via context.dev]" + data
+                    + "\n\nAnswer my question above using this live data, and say where it came from."
+            }
+        } catch {
+            print("ERR: \(error.localizedDescription)")
+        }
+        sem.signal()
+    }
+    sem.wait()
     exit(0)
 }
 

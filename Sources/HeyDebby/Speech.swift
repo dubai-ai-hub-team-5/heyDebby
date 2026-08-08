@@ -104,7 +104,7 @@ final class SpeechInput {
     }
 }
 
-final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate {
+final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
     /// Called on main thread when speech starts with full text.
     var onSpeakStart: ((String) -> Void)?
     /// Called on main thread with a rolling window of text as each word is spoken.
@@ -114,6 +114,19 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate {
 
     private let synth = AVSpeechSynthesizer()
     private var currentUtterance: AVSpeechUtterance?
+
+    // ElevenLabs path: an MP3 arrives whole and plays through AVAudioPlayer. `speakGen`
+    // is the identity guard (like currentUtterance ===): a fetch that returns after a
+    // stop()/new speak() must not start playing over the top of what replaced it.
+    private var player: AVAudioPlayer?
+    private var ttsTask: Task<Void, Never>?
+    private var speakGen = 0
+
+    /// Settings, or an ELEVENLABS_API_KEY env fallback. Empty means use the native voice.
+    static func elevenKey() -> String {
+        let stored = UserDefaults.standard.string(forKey: "elevenApiKey") ?? ""
+        return stored.isEmpty ? (ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"] ?? "") : stored
+    }
 
     /// Real English voices, best first — novelty and legacy robo-voices excluded.
     static func candidateVoices() -> [AVSpeechSynthesisVoice] {
@@ -128,9 +141,19 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate {
         return quality + (v.language == "en-US" ? 10 : 0)
     }
 
+    /// Speak `text`. Routes to ElevenLabs when the engine is set to it and a key exists,
+    /// otherwise the native synthesiser. Either way `onSpeakStart`/`onSpeakEnd` fire exactly
+    /// once, so the LessonPlayer that waits on the end callback behaves identically.
     func speak(_ text: String) {
         stop()
         guard !text.isEmpty else { return }
+        let engine = UserDefaults.standard.string(forKey: "voiceEngine") ?? "system"
+        let key = Self.elevenKey()
+        if engine == "eleven", !key.isEmpty { speakEleven(text, apiKey: key) }
+        else { speakSystem(text) }
+    }
+
+    private func speakSystem(_ text: String) {
         let utt = AVSpeechUtterance(string: text)
         let chosenId = UserDefaults.standard.string(forKey: "voiceId") ?? ""
         utt.voice = (chosenId.isEmpty ? nil : AVSpeechSynthesisVoice(identifier: chosenId))
@@ -144,7 +167,61 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate {
         onSpeakStart?(text)
     }
 
+    private func speakEleven(_ text: String, apiKey: String) {
+        speakGen += 1
+        let gen = speakGen
+        onSpeakStart?(text)
+        let voiceID = UserDefaults.standard.string(forKey: "elevenVoiceId") ?? ""
+        let model = UserDefaults.standard.string(forKey: "elevenModel") ?? ""
+        ttsTask = Task { [weak self] in
+            do {
+                let data = try await Eleven.tts(apiKey: apiKey, voiceID: voiceID, model: model, text: text)
+                if Task.isCancelled { return }
+                DispatchQueue.main.async { [weak self] in self?.playEleven(data, gen: gen, fallback: text) }
+            } catch {
+                // A bad key, an unknown voice, or a dropped connection must not leave Debby
+                // mute — fall back to the native voice so the reply is still spoken and the
+                // lesson still advances.
+                DebbyLog.write("ELEVEN tts failed: \(error.localizedDescription) — native voice")
+                if Task.isCancelled { return }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.speakGen == gen else { return }
+                    self.speakSystem(text)
+                }
+            }
+        }
+    }
+
+    private func playEleven(_ data: Data, gen: Int, fallback: String) {
+        guard speakGen == gen else { return }   // superseded while the MP3 was in flight
+        do {
+            let p = try AVAudioPlayer(data: data)
+            p.delegate = self
+            player = p
+            p.play()
+        } catch {
+            DebbyLog.write("ELEVEN play failed: \(error.localizedDescription) — native voice")
+            speakSystem(fallback)
+        }
+    }
+
+    /// Async so it never re-enters the LessonPlayer pump from inside speak()'s own stop().
+    private func fireSpeakEnd() {
+        DispatchQueue.main.async { [weak self] in self?.onSpeakEnd?() }
+    }
+
     func stop() {
+        // ElevenLabs: cancel any in-flight fetch and stop playback. Bump the generation so a
+        // fetch that lands after this is ignored. Fire the end callback only if something was
+        // actually playing, matching the synth's didCancel behaviour.
+        speakGen += 1
+        ttsTask?.cancel()
+        ttsTask = nil
+        if let p = player {
+            p.stop()
+            player = nil
+            fireSpeakEnd()
+        }
         synth.stopSpeaking(at: .immediate)
     }
 
@@ -176,5 +253,13 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate {
         guard utterance === currentUtterance else { return }
         currentUtterance = nil
         DispatchQueue.main.async { [weak self] in self?.onSpeakEnd?() }
+    }
+
+    // MARK: - AVAudioPlayerDelegate (ElevenLabs playback)
+
+    func audioPlayerDidFinishPlaying(_ p: AVAudioPlayer, successfully flag: Bool) {
+        guard p === player else { return }   // a stop() already retired this one
+        player = nil
+        fireSpeakEnd()
     }
 }

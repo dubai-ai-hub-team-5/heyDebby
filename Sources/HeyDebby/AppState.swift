@@ -58,6 +58,7 @@ final class AppState: ObservableObject {
     @Published var isListening = false
     @Published var partial = ""           // live transcript while listening
     @Published var isThinking = false
+    @Published var webFetch: String?      // a short label of what's being pulled from context.dev, or nil
     @Published var showNext = false
     @Published var container: CGRect?     // normalized top-left-origin focus area
     @Published var reply = ""             // last thing Debby said (also spoken aloud)
@@ -175,6 +176,24 @@ final class AppState: ObservableObject {
         let m = UserDefaults.standard.string(forKey: "openaiModel") ?? ""
         return m.isEmpty ? OpenAI.defaultModel : m
     }
+    /// The context.dev key for live web-data fetches. Settings, or a CONTEXT_API_KEY env
+    /// fallback, mirroring the model keys.
+    var contextApiKey: String {
+        let stored = UserDefaults.standard.string(forKey: "contextApiKey") ?? ""
+        return stored.isEmpty ? (ProcessInfo.processInfo.environment["CONTEXT_API_KEY"] ?? "") : stored
+    }
+    /// FETCH: is offered to the model only when there's a key to serve it — see debbyWebData.
+    var hasWebData: Bool { !contextApiKey.isEmpty }
+
+    /// A short label for the notch while a context.dev fetch is in flight — the host for a
+    /// URL, the quoted query for a search — so the demo shows what's pulled and from where.
+    static func fetchLabel(_ fetches: [String]) -> String {
+        guard let first = fetches.first else { return "the web" }
+        switch ContextDev.parseRequest(first) {
+        case .scrape(let url): return URL(string: url)?.host ?? url
+        case .search(let q):   return "“\(q.count > 32 ? q.prefix(32) + "…" : q)”"
+        }
+    }
 
     // MARK: - Notch
 
@@ -217,6 +236,7 @@ final class AppState: ObservableObject {
         clearContainer()
         showNext = false
         isThinking = false
+        webFetch = nil
         isSpeaking = false
         speakingText = ""
         reply = ""
@@ -239,6 +259,7 @@ final class AppState: ObservableObject {
         reply = ""
         showNext = false
         isThinking = false
+        webFetch = nil
         overlay.hide()
         voice.stop()
         lessonPlayer?.cancel()
@@ -418,6 +439,7 @@ final class AppState: ObservableObject {
         }
         partialReply = ""
         isThinking = true
+        webFetch = nil
         let gen = chatGeneration
         // Snapshot: the same container/screen must be used for crop AND mapping,
         // even if the user changes them during the multi-second request.
@@ -426,6 +448,11 @@ final class AppState: ObservableObject {
         // The prompt quotes this so the model can make squares square and turns perpendicular.
         debbyScreenAspect = screen.frame.width / max(1, screen.frame.height)
         debbyAppControl = appControl
+        // Offer FETCH: to the model only when there's a context.dev key to serve it, and
+        // snapshot the key for the whole turn — same one-read reasoning as `brain`.
+        let webData = hasWebData
+        debbyWebData = webData
+        let ctxKey = contextApiKey
         Task {
             do {
                 // An auto-advance step changes nothing on screen except our own drawing,
@@ -434,32 +461,64 @@ final class AppState: ObservableObject {
                     ? try await Capture.screen(excludingSelf: true, cropTo: snapContainer,
                                                displayID: screen.displayID)
                     : Capture.Shot(base64: "", filePath: "")
-                let reply: String
-                switch brain {
-                case "codex":
-                    reply = try await Codex.send(model: codexModel, history: history,
-                                                 userText: text, imageB64: shot.base64)
-                case "claudecli":
-                    reply = try await Claude.CLI.send(history: history, userText: text,
-                                                      imagePath: shot.filePath)
-                case "gemini":
-                    reply = try await Gemini.send(apiKey: geminiApiKey, model: geminiModel,
-                                                   history: history, userText: text, imageB64: shot.base64)
-                case "openai":
-                    // Streamed: beats reach the player as they arrive, so Debby starts
-                    // speaking at the first finished sentence instead of the last token.
-                    // The lesson has already played by the time this returns; only the
-                    // raw text comes back, for history.
-                    reply = try await streamLesson(gen: gen, container: snapContainer,
-                                                   screen: screen, text: text,
-                                                   imageB64: shot.base64)
-                default:
-                    reply = try await Claude.send(apiKey: apiKey, model: model, history: history,
-                                                  userText: text, imageB64: shot.base64)
+                // One brain call for a given prompt. `useShot` only on the first turn: a
+                // FETCH follow-up re-asks with the same screen already described, plus data.
+                // The openai case streams — the lesson has played by the time it returns; only
+                // the raw text comes back, for history and for spotting a FETCH request.
+                // @MainActor so the streamLesson call stays on the actor talk() already runs on.
+                @MainActor func callBrain(_ userText: String, useShot: Bool) async throws -> String {
+                    let b64 = useShot ? shot.base64 : ""
+                    let path = useShot ? shot.filePath : ""
+                    switch brain {
+                    case "codex":     return try await Codex.send(model: codexModel, history: history, userText: userText, imageB64: b64)
+                    case "claudecli": return try await Claude.CLI.send(history: history, userText: userText, imagePath: path)
+                    case "gemini":    return try await Gemini.send(apiKey: geminiApiKey, model: geminiModel, history: history, userText: userText, imageB64: b64)
+                    case "openai":    return try await streamLesson(gen: gen, container: snapContainer, screen: screen, text: userText, imageB64: b64)
+                    default:          return try await Claude.send(apiKey: apiKey, model: model, history: history, userText: userText, imageB64: b64)
+                    }
                 }
-                // The HTTP backends logged nothing at all, so "it didn't draw" was undebuggable:
-                // no reply, no parse result, no way to tell a refusal from a dropped DRAWINGS line.
-                DebbyLog.write("CHAT \(brain) reply:\n\(reply)")
+
+                // Live-web-data loop. The model can answer with a FETCH: request instead of an
+                // answer; we pull it from context.dev, fold the result into the prompt, and ask
+                // again. Capped at two rounds so a model that keeps asking cannot loop forever.
+                var reply = ""
+                var effectiveText = text
+                var fetchRound = 0
+                while true {
+                    reply = try await callBrain(effectiveText, useShot: fetchRound == 0 && withShot)
+                    // The HTTP backends logged nothing at all, so "it didn't draw" was
+                    // undebuggable: no reply, no parse result, no way to tell a refusal from a
+                    // dropped marker line.
+                    DebbyLog.write("CHAT \(brain) reply:\n\(reply)")
+                    guard gen == chatGeneration else { return }
+                    let fetches = parseReply(reply).fetches
+                    guard webData, !ctxKey.isEmpty, !fetches.isEmpty, fetchRound < 2 else { break }
+                    fetchRound += 1
+                    // The streamed brain installed a player for this fetch-only turn (which
+                    // played nothing — FETCH is not a beat). Cancel it so the answer turn's
+                    // player starts clean; a no-op for the one-shot brains.
+                    lessonPlayer?.cancel()
+                    lessonPlayer = nil
+                    isThinking = true   // fetching can take seconds; keep the spinner up
+                    // Surface WHAT is being pulled and WHERE from, so the notch shows a live
+                    // context.dev fetch rather than looking like it's still reading the screen.
+                    webFetch = Self.fetchLabel(fetches)
+                    var data = ""
+                    for f in fetches.prefix(3) {
+                        DebbyLog.write("FETCH \(f)")
+                        do { data += "\n\n" + (try await ContextDev.fetch(f, apiKey: ctxKey)) }
+                        catch {
+                            DebbyLog.write("FETCH failed \(f): \(error.localizedDescription)")
+                            data += "\n\n[Could not fetch \(f): \(error.localizedDescription)]"
+                        }
+                    }
+                    webFetch = nil
+                    guard gen == chatGeneration else { return }
+                    effectiveText = text
+                        + "\n\n[LIVE WEB DATA — fetched just now via context.dev]" + data
+                        + "\n\nAnswer my question above using this live data, and say where it "
+                        + "came from. Do not emit another FETCH unless it is essential."
+                }
                 // Parsed for both paths: the streamed brain plays from the same BeatSplitter,
                 // which the self-check proves chunk-invariant, so these counts are what really
                 // played — and it's the brain that most needs field debugging.

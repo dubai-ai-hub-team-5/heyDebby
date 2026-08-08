@@ -83,12 +83,12 @@ other file is a focused capability it calls into.
    temp file (for CLI brains). Never archived.
 4. **Ask** — `AppState` picks a brain (§2.3) and sends history + question +
    screenshot with a shared system prompt (`Claude.systemPrompt`).
-5. **Parse** — the reply is a stream of one-marker-per-line beats (§2.5):
-   prose to speak, `POINT:`/`DRAW:` to render, `RUN:` to execute, `MORE:` to
-   continue a multi-step walkthrough.
-6. **Answer** — `Speech.swift` speaks (best installed English `AVSpeechSynthesis`
-   voice); `UI.swift` draws pulsing pointers and shapes on a transparent,
-   click-through overlay that auto-hides after 8s.
+5. **Parse** — the reply is a stream of one-marker-per-line beats (§2.6):
+   prose to speak, `POINT:`/`DRAW:` to render, `RUN:` to execute, `FETCH:` to pull
+   live web data (§2.4), `MORE:` to continue a multi-step walkthrough.
+6. **Answer** — `Speech.swift` speaks — the native `AVSpeechSynthesis` voice by
+   default, or a streamed **ElevenLabs** voice (§2.4) — and `UI.swift` draws pulsing
+   pointers and shapes on a transparent, click-through overlay that auto-hides in 8s.
 
 ### 2.3 Brains — five backends, one interface
 
@@ -108,7 +108,41 @@ Each brain is a small `enum` (`Codex.swift`, `Claude.swift`, `OpenAI.swift`,
 `Gemini.swift`) exposing one `send`/`stream` function. The system prompt is shared,
 so switching brains changes nothing about how replies are parsed or rendered.
 
-### 2.4 Agents — the slow, powerful path
+### 2.4 Live web data (context.dev) and ElevenLabs voice
+
+**Live web data — the `FETCH:` loop.** Debby answers about your screen, but the
+screen points at the live web — prices, docs, availability — that changes by the
+minute. The chat brains answer in one shot (no tool-calling loop), so "pull live
+data" is expressed as a marker, exactly like `DRAW:`/`RUN:`:
+
+1. When the honest answer needs something current, the model replies with only a
+   `FETCH:` line — a URL to scrape, or `search: <query>` — and nothing else.
+2. `ContextDev.fetch` (in `Context.swift`) calls [context.dev](https://context.dev):
+   `GET /v1/web/scrape/markdown` for a URL (clean, LLM-ready Markdown), or
+   `POST /v1/web/search` for a query (ranked results with snippets). Zero-dependency
+   `URLSession` HTTPS; `Authorization: Bearer` from settings or `CONTEXT_API_KEY`.
+3. `AppState.talk()` folds the fresh result back into the prompt and re-asks the same
+   brain, which now answers from live data and cites the source. Capped at two rounds
+   so a model that keeps asking can't loop forever.
+
+This is what makes "changes mid-conversation" literal: every turn can fetch the page
+as it is *now*. `FETCH:` is offered to the model (`debbyWebData`, gating the prompt
+section) only when a context.dev key is configured — a model told it can fetch when
+it can't would promise data it never gets. During a fetch the notch shows
+*"Fetching live from context.dev · <host/query>"*, so the source is visible, not
+hidden behind a generic spinner. `ContextDev.parseRequest` (URL vs. query) is a pure
+function, covered by `--selfcheck`.
+
+**Voice — ElevenLabs.** `SpeechOutput` (in `Speech.swift`) speaks through the native
+`AVSpeechSynthesizer` by default, or streams from ElevenLabs (`Eleven.swift`,
+`POST /v1/text-to-speech/{voice}`, `xi-api-key`) when the voice engine is set to it
+and a key exists (settings or `ELEVENLABS_API_KEY`). An MP3 arrives whole and plays
+through `AVAudioPlayer`; the same `onSpeakStart`/`onSpeakEnd` callbacks fire either
+way, so the `LessonPlayer` that waits on end-of-speech behaves identically. **Any
+failure — bad key, unknown voice, dropped connection — falls straight back to the
+native voice**, so Debby never goes silent.
+
+### 2.5 Agents — the slow, powerful path
 
 "agent …" routes to `AgentRunner.swift`, which spawns the `claude -p` or
 `codex exec` CLI as a `Process` and streams stdout into the notch (newest line
@@ -129,7 +163,7 @@ tickers). This is where tools and MCP live; the app owns none of that machinery.
   switch** and *full access* cannot bypass it — Debby never types a credential,
   card number, or one-time code, and never attempts a CAPTCHA.
 
-### 2.5 Beats, lessons, and app control
+### 2.6 Beats, lessons, and app control
 
 The wire format is one marker per line, inline with prose, instead of a trailing
 JSON block. `Beats.swift`'s `BeatSplitter` turns a reply — streamed in fragments or
@@ -151,7 +185,7 @@ With OpenAI streaming, time-to-first-word is ~1s instead of ~12s.
 (`["-e", stmt]`), never a shell string. The fast path (chat brain emits `RUN:`)
 answers in ~2s; the slow path is `Bash(osascript:*)` inside an agent run.
 
-### 2.6 Form filling — no Swift, no RAG
+### 2.7 Form filling — no Swift, no RAG
 
 `Profile.swift` holds the user's details as `~/Library/Application
 Support/HeyDebby/profile.json`, mode `0600`, written once from an agent scan of the
@@ -165,7 +199,7 @@ answering "what's my passport number," so `profile.json` *is* the retrieval and
 Spotlight covers the rest. It also inverts the privacy story, and `NLEmbedding`
 ships offline if semantic search is ever genuinely needed.
 
-### 2.7 Security rails (not configurable)
+### 2.8 Security rails (not configurable)
 
 - The `NEED:` gate has no off switch; *full access* changes CLI permission flags,
   not the gate.
@@ -178,19 +212,21 @@ ships offline if semantic search is ever genuinely needed.
 - Destructive actions (delete, send mail, spend money) are never `RUN:` material;
   the prompt routes them to an agent run where the gate applies.
 
-### 2.8 File map
+### 2.9 File map
 
 | File | Responsibility |
 |---|---|
-| `main.swift` | Bootstrap, `AppDelegate`, menu-bar item, `runSelfCheck()`, `--notchcheck`/`--codex-check`/`--gemini-check` |
-| `AppState.swift` | `@MainActor` orchestration, `resolveBackend`, brain routing, confirm `Gate`, agent lifecycle |
+| `main.swift` | Bootstrap, `AppDelegate`, menu-bar item, `runSelfCheck()`, headless `--*-check` link tests |
+| `AppState.swift` | `@MainActor` orchestration, `resolveBackend`, brain routing, the `FETCH:` loop, confirm `Gate`, agent lifecycle |
 | `Hotkey.swift` | ⌃⌥ talk chord via the global `flagsChanged` stream |
-| `Speech.swift` | STT (silence auto-finalize) + TTS |
+| `Speech.swift` | STT (silence auto-finalize) + TTS (native `AVSpeechSynthesizer` or ElevenLabs playback) |
 | `Capture.swift` | ScreenCaptureKit screenshot → JPEG base64 + temp file, focus-area crop |
 | `Claude.swift` | Anthropic API + `claude` CLI, shared system prompt, `parseReply` |
 | `Codex.swift` / `OpenAI.swift` / `Gemini.swift` | The other brains |
+| `Context.swift` | context.dev live web data — scrape-to-Markdown + web search, `parseRequest` |
+| `Eleven.swift` | ElevenLabs text-to-speech client |
 | `AgentRunner.swift` | Background CLI agents, `agentCommand` (session id / resume, allowlists) |
-| `Beats.swift` | `Beat` + `BeatSplitter` (streaming-safe, one marker per line) |
+| `Beats.swift` | `Beat` + `BeatSplitter` (streaming-safe, one marker per line), `fetches` |
 | `Lesson.swift` | `LessonPlayer` — draw/speech sync engine |
 | `Control.swift` | `RUN:` AppleScript via `osascript` argv |
 | `Need.swift` | `NeedScanner` — the confirm-gate trigger |
@@ -198,14 +234,19 @@ ships offline if semantic search is ever genuinely needed.
 | `Log.swift` | `~/Library/Logs/HeyDebby/debby.log`, front-trimmed at 2 MB |
 | `UI.swift` | The notch, settings, click-through overlay |
 
-### 2.9 Testing
+### 2.10 Testing
 
 There is no XCTest target by design. Pure logic is asserted inside `runSelfCheck()`
 in `main.swift` and run by `build.sh` against the **debug** binary (`assert` is
 compiled out of release builds). Covered: `BeatSplitter` chunk-boundary invariance,
 sentence splitting (`3.14` doesn't split), malformed-shape dropping, `NeedScanner`
-across chunk boundaries, `agentCommand` flag ordering, the `RUN:` shell-out refusal,
-`Control` argv escaping, `Profile.extractJSON`, and `resolveBackend`. Everything
+and `FETCH:` across chunk boundaries, `agentCommand` flag ordering, the `RUN:`
+shell-out refusal, `Control` argv escaping, `ContextDev.parseRequest` (URL vs.
+query), `Profile.extractJSON`, and `resolveBackend`.
+
+Live backends are verified by headless link checks that read keys the way the app
+does: `--chat-check` (the whole loop: model → `FETCH:` → context.dev → answer),
+`--context-check`, `--eleven-check`, `--codex-check`, `--gemini-check`. Everything
 else is OS integration, verified by running.
 
 ---
@@ -216,7 +257,9 @@ else is OS integration, verified by running.
 |---|---|---|
 | Language / stack | **Native Swift, zero deps** | Every feature maps onto a first-party API; it's both the most faithful *and* the least code. Electron is heavy and un-Mac-like; Python/pyobjc has a fragile permissions story. `Package.swift` has no dependencies and gains none. |
 | Screenshots | **ScreenCaptureKit** | Modern, can exclude own windows, per-display, croppable — no legacy `CGWindowList`. |
-| Voice in/out | **SFSpeechRecognizer + AVSpeechSynthesizer** | On-device, free, no streaming-STT vendor. |
+| Voice in | **SFSpeechRecognizer** | On-device, free, no streaming-STT vendor. |
+| Voice out | **AVSpeechSynthesizer, or ElevenLabs** | Native is free and offline; ElevenLabs is the natural, designed voice for the persona, added as one file (`Eleven.swift`) with a native fallback so a bad key never mutes Debby. |
+| Live web data | **context.dev via a `FETCH:` marker** | The chat brains have no tool loop, so a marker + a re-ask is the whole mechanism — the same shape as `DRAW:`/`RUN:`. context.dev returns clean, LLM-ready Markdown (and web search) from one key, so the app scrapes nothing itself and manages no proxies. Answers stay grounded in the web *now*, not training data. |
 | Talk trigger | **Global `flagsChanged` monitor** | A modifier-only chord (⌃⌥) can't be a Carbon hot key. Costs an Accessibility grant; keeps the menu bar working underneath. |
 | AI auth | **Reuse the CLI's OAuth token / shell out to the CLI** | The privacy premise: no API key, nothing leaves the machine except to the model the user already pays for. API keys are the fallback, not the default. |
 | Agents | **`claude -p` / `codex exec` as subprocesses** | The CLIs already own tools, sandboxing, and MCP. Re-implementing any of it in Swift would be slower and worse. |

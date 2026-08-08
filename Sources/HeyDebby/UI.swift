@@ -575,6 +575,7 @@ struct NotchView: View {
 
     private var headline: String {
         if state.isListening { return state.partial.isEmpty ? "Listening…" : state.partial }
+        if let w = state.webFetch { return "Fetching live from context.dev · \(w)" }
         if state.isThinking { return "Looking at your screen…" }
         if state.isSpeaking { return "" }  // text shown as a pill beside the cursor while speaking
         if !state.reply.isEmpty { return state.reply }
@@ -858,6 +859,10 @@ struct SettingsView: View {
     @AppStorage("openaiModel") private var openaiModel = ""
     @AppStorage("voiceReplies") private var voiceReplies = true
     @AppStorage("voiceId") private var voiceId = ""
+    @AppStorage("voiceEngine") private var voiceEngine = "system"
+    @AppStorage("elevenApiKey") private var elevenApiKey = ""
+    @AppStorage("elevenVoiceId") private var elevenVoiceId = ""
+    @AppStorage("contextApiKey") private var contextApiKey = ""
     @AppStorage("agentFullAccess") private var agentFullAccess = false
     @AppStorage("appControl") private var appControl = false
     @AppStorage("browserControl") private var browserControl = false
@@ -969,17 +974,43 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Voice & apps").font(.headline)
             Toggle("Speak replies aloud", isOn: $voiceReplies)
-            Picker("Voice", selection: $voiceId) {
-                Text("Auto (best installed)").tag("")
-                ForEach(SpeechOutput.candidateVoices(), id: \.identifier) { v in
-                    Text(voiceLabel(v)).tag(v.identifier)
-                }
+            Picker("Voice engine", selection: $voiceEngine) {
+                Text("System (macOS)").tag("system")
+                Text("ElevenLabs").tag("eleven")
             }
             .frame(width: 260)
-            Button("Get better voices…") {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.universalaccess")!)
+            if voiceEngine == "eleven" {
+                SecureField("ElevenLabs API key (sk_…)", text: $elevenApiKey)
+                    .frame(width: 260)
+                TextField("Voice ID (blank = Sarah)", text: $elevenVoiceId)
+                    .frame(width: 260)
+                Text("Natural ElevenLabs speech, streamed per sentence. Blank key falls back "
+                     + "to ELEVENLABS_API_KEY; any failure falls back to the system voice. "
+                     + "Copy a Voice ID from elevenlabs.io → Voices.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
+            } else {
+                Picker("Voice", selection: $voiceId) {
+                    Text("Auto (best installed)").tag("")
+                    ForEach(SpeechOutput.candidateVoices(), id: \.identifier) { v in
+                        Text(voiceLabel(v)).tag(v.identifier)
+                    }
+                }
+                .frame(width: 260)
+                Button("Get better voices…") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.universalaccess")!)
+                }
+                Text("Download a Premium voice under Spoken Content → System Voice → Manage Voices; Debby auto-picks it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
             }
-            Text("Download a Premium voice under Spoken Content → System Voice → Manage Voices; Debby auto-picks it.")
+            Divider()
+            Text("Live web data").font(.subheadline)
+            SecureField("context.dev API key (ctxt_…)", text: $contextApiKey)
+                .frame(width: 260)
+            Text("Lets Debby pull live web data — current prices, news, a page you're on — "
+                 + "the moment she needs it, via context.dev. Blank falls back to "
+                 + "CONTEXT_API_KEY. Free key at context.dev.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(width: 260, alignment: .leading)
             Divider()
