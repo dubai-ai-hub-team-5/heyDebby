@@ -551,6 +551,7 @@ struct NotchView: View {
 
     private var headline: String {
         if state.isListening { return state.partial.isEmpty ? "Listening…" : state.partial }
+        if let w = state.webFetch { return "Fetching live from context.dev · \(w)" }
         if state.isThinking { return "Looking at your screen…" }
         if state.isSpeaking { return "" }  // text shown as a pill beside the cursor while speaking
         if !state.reply.isEmpty { return state.reply }
@@ -838,9 +839,10 @@ struct SettingsView: View {
     @AppStorage("voiceReplies") private var voiceReplies = true
     @AppStorage("voiceSource") private var voiceSource = ""
     @AppStorage("voiceId") private var voiceId = ""
-    @AppStorage("elevenlabsApiKey") private var elevenlabsApiKey = ""
-    @AppStorage("elevenlabsVoiceId") private var elevenlabsVoiceId = ""
-    @AppStorage("elevenlabsModel") private var elevenlabsModel = ""
+    @AppStorage("voiceEngine") private var voiceEngine = "system"
+    @AppStorage("elevenApiKey") private var elevenApiKey = ""
+    @AppStorage("elevenVoiceId") private var elevenVoiceId = ""
+    @AppStorage("contextApiKey") private var contextApiKey = ""
     @AppStorage("agentFullAccess") private var agentFullAccess = false
     @AppStorage("appControl") private var appControl = false
     @AppStorage("browserControl") private var browserControl = false
@@ -971,30 +973,19 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Voice & apps").font(.headline)
             Toggle("Speak replies aloud", isOn: $voiceReplies)
-            Picker("Voice source", selection: $voiceSource) {
-                Text("Auto (best installed)").tag("")
-                Text("ElevenLabs (API key)").tag("elevenlabs")
+            Picker("Voice engine", selection: $voiceEngine) {
+                Text("System (macOS)").tag("system")
+                Text("ElevenLabs").tag("eleven")
             }
             .frame(width: 260)
-            if voiceSource == "elevenlabs" {
-                SecureField("ElevenLabs API key", text: $elevenlabsApiKey)
+            if voiceEngine == "eleven" {
+                SecureField("ElevenLabs API key (sk_…)", text: $elevenApiKey)
                     .frame(width: 260)
-                Picker("ElevenLabs voice", selection: $elevenlabsVoiceId) {
-                    Text("Brittney (default)").tag("")
-                    ForEach(elevenlabsVoices, id: \.0) { id, name in
-                        Text(name).tag(id)
-                    }
-                }
-                .frame(width: 260)
-                TextField("Model (blank = \(SpeechOutput.defaultElevenLabsModel))", text: $elevenlabsModel)
+                TextField("Voice ID (blank = Sarah)", text: $elevenVoiceId)
                     .frame(width: 260)
-                HStack(spacing: 8) {
-                    Button("Refresh voices") { loadElevenLabsVoices() }
-                        .controlSize(.small)
-                        .disabled(loadingElevenLabsVoices)
-                    if loadingElevenLabsVoices { ProgressView().controlSize(.mini) }
-                }
-                Text("Get an API key at elevenlabs.io. Blank key falls back to ELEVENLABS_API_KEY.")
+                Text("Natural ElevenLabs speech, streamed per sentence. Blank key falls back "
+                     + "to ELEVENLABS_API_KEY; any failure falls back to the system voice. "
+                     + "Copy a Voice ID from elevenlabs.io → Voices.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)
             } else {
@@ -1012,6 +1003,15 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)
             }
+            Divider()
+            Text("Live web data").font(.subheadline)
+            SecureField("context.dev API key (ctxt_…)", text: $contextApiKey)
+                .frame(width: 260)
+            Text("Lets Debby pull live web data — current prices, news, a page you're on — "
+                 + "the moment she needs it, via context.dev. Blank falls back to "
+                 + "CONTEXT_API_KEY. Free key at context.dev.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(width: 260, alignment: .leading)
             Divider()
             ComposioSection()
             Divider()

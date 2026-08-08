@@ -128,6 +128,19 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDe
     private var currentRequestID: UUID?
     private var elevenTask: Task<Void, Never>?
 
+    // ElevenLabs path: an MP3 arrives whole and plays through AVAudioPlayer. `speakGen`
+    // is the identity guard (like currentUtterance ===): a fetch that returns after a
+    // stop()/new speak() must not start playing over the top of what replaced it.
+    private var player: AVAudioPlayer?
+    private var ttsTask: Task<Void, Never>?
+    private var speakGen = 0
+
+    /// Settings, or an ELEVENLABS_API_KEY env fallback. Empty means use the native voice.
+    static func elevenKey() -> String {
+        let stored = UserDefaults.standard.string(forKey: "elevenApiKey") ?? ""
+        return stored.isEmpty ? (ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"] ?? "") : stored
+    }
+
     /// Real English voices, best first — novelty and legacy robo-voices excluded.
     static func candidateVoices() -> [AVSpeechSynthesisVoice] {
         AVSpeechSynthesisVoice.speechVoices()
@@ -141,46 +154,19 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDe
         return quality + (v.language == "en-US" ? 10 : 0)
     }
 
+    /// Speak `text`. Routes to ElevenLabs when the engine is set to it and a key exists,
+    /// otherwise the native synthesiser. Either way `onSpeakStart`/`onSpeakEnd` fire exactly
+    /// once, so the LessonPlayer that waits on the end callback behaves identically.
     func speak(_ text: String) {
         stop()
         guard !text.isEmpty else { return }
-        let source = UserDefaults.standard.string(forKey: "voiceSource") ?? ""
-        let key = elevenLabsAPIKey()
-        if source == "elevenlabs" && !key.isEmpty {
-            let requestID = UUID()
-            currentRequestID = requestID
-            speakElevenLabs(text, apiKey: key, requestID: requestID)
-        } else {
-            if source == "elevenlabs" {
-                DebbyLog.write("ElevenLabs selected but no API key; falling back to native TTS")
-            }
-            currentRequestID = nil
-            speakNative(text)
-        }
+        let engine = UserDefaults.standard.string(forKey: "voiceEngine") ?? "system"
+        let key = Self.elevenKey()
+        if engine == "eleven", !key.isEmpty { speakEleven(text, apiKey: key) }
+        else { speakSystem(text) }
     }
 
-    func stop() {
-        elevenTask?.cancel()
-        elevenTask = nil
-        synth.stopSpeaking(at: .immediate)
-        player?.stop()
-        player?.delegate = nil
-        player = nil
-        wordTimer?.invalidate()
-        wordTimer = nil
-        activeText = ""
-        currentUtterance = nil
-        currentRequestID = nil
-        audioRequestID = nil
-        if let f = audioFile {
-            try? FileManager.default.removeItem(at: f)
-            audioFile = nil
-        }
-    }
-
-    // MARK: - Native TTS
-
-    private func speakNative(_ text: String) {
+    private func speakSystem(_ text: String) {
         let utt = AVSpeechUtterance(string: text)
         let chosenId = UserDefaults.standard.string(forKey: "voiceId") ?? ""
         utt.voice = (chosenId.isEmpty ? nil : AVSpeechSynthesisVoice(identifier: chosenId))
@@ -194,199 +180,62 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDe
         onSpeakStart?(text)
     }
 
-    // MARK: - ElevenLabs TTS
-
-    private func elevenLabsAPIKey() -> String {
-        let stored = UserDefaults.standard.string(forKey: "elevenlabsApiKey") ?? ""
-        if !stored.isEmpty { return stored }
-        let env = ProcessInfo.processInfo.environment
-        return env["ELEVENLABS_API_KEY"] ?? env["ELEVEN_API_KEY"] ?? ""
-    }
-
-    private func effectiveElevenLabsVoice() -> String {
-        let stored = UserDefaults.standard.string(forKey: "elevenlabsVoiceId") ?? ""
-        return stored.isEmpty ? Self.defaultElevenLabsVoice : stored
-    }
-
-    private func effectiveElevenLabsModel() -> String {
-        let stored = UserDefaults.standard.string(forKey: "elevenlabsModel") ?? ""
-        return stored.isEmpty ? Self.defaultElevenLabsModel : stored
-    }
-
-    private func speakElevenLabs(_ text: String, apiKey: String, requestID: UUID) {
-        activeText = text
-
-        let voiceId = effectiveElevenLabsVoice()
-        let model = effectiveElevenLabsModel()
-        guard let url = URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceId)") else {
-            DebbyLog.write("ElevenLabs bad voice id: \(voiceId)")
-            speakNative(text)
-            return
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
-        req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        let body: [String: Any] = [
-            "text": text,
-            "model_id": model,
-            "voice_settings": [
-                "stability": 0.5,
-                "similarity_boost": 0.75
-            ]
-        ]
-        do {
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        } catch {
-            DebbyLog.write("ElevenLabs request build failed: \(error.localizedDescription)")
-            speakNative(text)
-            return
-        }
-
-        let file = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + ".mp3")
-        audioFile = file
-        elevenTask = Task { [weak self] in
-            guard let self = self else { return }
-            let capturedID = requestID
+    private func speakEleven(_ text: String, apiKey: String) {
+        speakGen += 1
+        let gen = speakGen
+        onSpeakStart?(text)
+        let voiceID = UserDefaults.standard.string(forKey: "elevenVoiceId") ?? ""
+        let model = UserDefaults.standard.string(forKey: "elevenModel") ?? ""
+        ttsTask = Task { [weak self] in
             do {
-                let (data, resp) = try await URLSession.shared.data(for: req)
-                let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                guard status == 200 else {
-                    let detail = String(data: data, encoding: .utf8) ?? "no body"
-                    DebbyLog.write("ElevenLabs API error \(status): \(detail)")
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self, self.currentRequestID == capturedID else { return }
-                        self.audioFile = nil
-                        self.speakNative(text)
-                    }
-                    return
-                }
-                try data.write(to: file, options: .atomic)
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.currentRequestID == capturedID else {
-                        try? FileManager.default.removeItem(at: file)
-                        return
-                    }
-                    self.playAudioFile(file, text: text, requestID: capturedID)
-                }
-            } catch let err as URLError where err.code == .cancelled {
-                try? FileManager.default.removeItem(at: file)
-            } catch is CancellationError {
-                try? FileManager.default.removeItem(at: file)
+                let data = try await Eleven.tts(apiKey: apiKey, voiceID: voiceID, model: model, text: text)
+                if Task.isCancelled { return }
+                DispatchQueue.main.async { [weak self] in self?.playEleven(data, gen: gen, fallback: text) }
             } catch {
-                DebbyLog.write("ElevenLabs request failed: \(error.localizedDescription)")
+                // A bad key, an unknown voice, or a dropped connection must not leave Debby
+                // mute — fall back to the native voice so the reply is still spoken and the
+                // lesson still advances.
+                DebbyLog.write("ELEVEN tts failed: \(error.localizedDescription) — native voice")
+                if Task.isCancelled { return }
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, self.currentRequestID == capturedID else { return }
-                    self.audioFile = nil
-                    self.speakNative(text)
+                    guard let self, self.speakGen == gen else { return }
+                    self.speakSystem(text)
                 }
             }
         }
     }
 
-    private func playAudioFile(_ url: URL, text: String, requestID: UUID) {
-        guard currentRequestID == requestID else { return }
+    private func playEleven(_ data: Data, gen: Int, fallback: String) {
+        guard speakGen == gen else { return }   // superseded while the MP3 was in flight
         do {
-            let p = try AVAudioPlayer(contentsOf: url)
+            let p = try AVAudioPlayer(data: data)
             p.delegate = self
-            p.prepareToPlay()
             player = p
-            audioFile = url
-            audioRequestID = requestID
-            activeText = text
-            guard p.play() else {
-                DebbyLog.write("ElevenLabs audio player refused to start")
-                player?.delegate = nil
-                player = nil
-                audioRequestID = nil
-                try? FileManager.default.removeItem(at: url)
-                audioFile = nil
-                speakNative(text)
-                return
-            }
-            onSpeakStart?(text)
-            startWordTimer(text: text)
+            p.play()
         } catch {
-            DebbyLog.write("ElevenLabs audio playback failed: \(error.localizedDescription)")
-            player?.delegate = nil
+            DebbyLog.write("ELEVEN play failed: \(error.localizedDescription) — native voice")
+            speakSystem(fallback)
+        }
+    }
+
+    /// Async so it never re-enters the LessonPlayer pump from inside speak()'s own stop().
+    private func fireSpeakEnd() {
+        DispatchQueue.main.async { [weak self] in self?.onSpeakEnd?() }
+    }
+
+    func stop() {
+        // ElevenLabs: cancel any in-flight fetch and stop playback. Bump the generation so a
+        // fetch that lands after this is ignored. Fire the end callback only if something was
+        // actually playing, matching the synth's didCancel behaviour.
+        speakGen += 1
+        ttsTask?.cancel()
+        ttsTask = nil
+        if let p = player {
+            p.stop()
             player = nil
-            audioRequestID = nil
-            try? FileManager.default.removeItem(at: url)
-            audioFile = nil
-            speakNative(text)
+            fireSpeakEnd()
         }
-    }
-
-    private func startWordTimer(text: String) {
-        wordTimer?.invalidate()
-        guard let player = player, player.duration > 0 else { return }
-        let totalLength = text.count
-        wordTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] t in
-            guard let self, let player = self.player else { t.invalidate(); return }
-            if !player.isPlaying {
-                if player.currentTime >= player.duration - 0.01 {
-                    t.invalidate()
-                }
-                return
-            }
-            let progress = Double(player.currentTime / player.duration)
-            let endOffset = min(totalLength, Int(progress * Double(totalLength)))
-            guard endOffset > 0 else { return }
-            let end = text.index(text.startIndex, offsetBy: endOffset)
-            let start = text.index(end, offsetBy: -80, limitedBy: text.startIndex) ?? text.startIndex
-            let window: Substring
-            if start > text.startIndex, let space = text[start...].firstIndex(of: " ") {
-                window = text[text.index(after: space)..<end]
-            } else {
-                window = text[start..<end]
-            }
-            let display = String(window).trimmingCharacters(in: .whitespaces)
-            if !display.isEmpty { self.onWord?(display) }
-        }
-    }
-
-    private func finishAudio() {
-        if audioRequestID == currentRequestID {
-            currentRequestID = nil
-        }
-        audioRequestID = nil
-        wordTimer?.invalidate()
-        wordTimer = nil
-        player?.stop()
-        player?.delegate = nil
-        player = nil
-        if let f = audioFile {
-            try? FileManager.default.removeItem(at: f)
-            audioFile = nil
-        }
-        onSpeakEnd?()
-    }
-
-    static func elevenLabsVoices(apiKey: String) async -> [(String, String)] {
-        guard !apiKey.isEmpty else { return [] }
-        let url = URL(string: "https://api.elevenlabs.io/v1/voices")!
-        var req = URLRequest(url: url)
-        req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
-            guard status == 200 else {
-                DebbyLog.write("ElevenLabs voices error \(status)")
-                return []
-            }
-            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let voices = obj["voices"] as? [[String: Any]] else { return [] }
-            return voices.compactMap {
-                guard let id = $0["voice_id"] as? String,
-                      let name = $0["name"] as? String else { return nil }
-                return (id, name)
-            }.sorted { $0.1 < $1.1 }
-        } catch {
-            DebbyLog.write("ElevenLabs voices fetch failed: \(error.localizedDescription)")
-            return []
-        }
+        synth.stopSpeaking(at: .immediate)
     }
 
     // MARK: - AVSpeechSynthesizerDelegate
@@ -419,22 +268,11 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDe
         DispatchQueue.main.async { [weak self] in self?.onSpeakEnd?() }
     }
 
-    // MARK: - AVAudioPlayerDelegate
+    // MARK: - AVAudioPlayerDelegate (ElevenLabs playback)
 
-    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        let id = ObjectIdentifier(player)
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.player.map(ObjectIdentifier.init) == id else { return }
-            self.finishAudio()
-        }
-    }
-
-    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: (any Error)?) {
-        let id = ObjectIdentifier(player)
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.player.map(ObjectIdentifier.init) == id, !self.activeText.isEmpty else { return }
-            self.finishAudio()
-            self.speakNative(self.activeText)
-        }
+    func audioPlayerDidFinishPlaying(_ p: AVAudioPlayer, successfully flag: Bool) {
+        guard p === player else { return }   // a stop() already retired this one
+        player = nil
+        fireSpeakEnd()
     }
 }
