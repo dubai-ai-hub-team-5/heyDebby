@@ -460,6 +460,39 @@ func runSelfCheck() {
     assert(!browserNote.contains("passport") && !browserNote.contains("K1234567"),
            "the note must never carry an example of an actual profile value")
 
+    // --- browser policy: the prompt is guidance; this is the executable boundary ---
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_snapshot", input: [:]) == .allow,
+           "reading the visible page must remain automatic")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_navigate",
+                                  input: ["url": "https://example.com/form"]) == .allow,
+           "ordinary HTTPS navigation must remain automatic")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_fill_form", input: [
+        "fields": [["name": "Full name", "type": "textbox", "ref": "e12", "value": "Debby User"]]
+    ]) == .allow, "ordinary non-secret form fields must remain automatic")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_click",
+                                  input: ["element": "Submit application", "ref": "e90"]).isDenied,
+           "final submission must be handed to the user")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_fill_form", input: [
+        "fields": [["name": "Password", "type": "textbox", "ref": "e13", "value": "secret"]]
+    ]).isDenied, "password fields must never be filled")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_evaluate",
+                                  input: ["function": "() => document.cookie"]).isDenied,
+           "arbitrary page JavaScript must never execute")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__future_tool", input: [:]).isDenied,
+           "new Playwright tools must fail closed until reviewed")
+
+    let malformedHook = BrowserPolicy.evaluateHookJSON(Data("not json".utf8))
+    let malformedHookText = String(decoding: malformedHook, as: UTF8.self)
+    assert(malformedHookText.contains("\"permissionDecision\":\"deny\""),
+           "malformed hook input must fail closed")
+    let policySettings = try! BrowserPolicy.settingsJSON(
+        executablePath: "/Applications/Hey Debby.app/Contents/MacOS/HeyDebby")
+    let policySettingsText = String(decoding: policySettings, as: UTF8.self)
+    assert(policySettingsText.contains("PreToolUse") && policySettingsText.contains("mcp__playwright"),
+           "per-run settings must register the browser hook")
+    assert(policySettingsText.contains("--browser-policy-hook") && policySettingsText.contains("Hey Debby.app"),
+           "the hook must invoke the current app executable, including paths with spaces")
+
     // The marker is documented only when the feature is on. A model told about a marker
     // the app will drop announces actions that never happen.
     assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("RUN:"),
@@ -697,6 +730,12 @@ func runSelfCheck() {
     assert(Profile.extractJSON("{not valid json}") == nil,
            "syntactically invalid JSON must be rejected, not written to disk")
     assert(Profile.extractJSON("") == nil, "empty output yields nil")
+}
+
+if CommandLine.arguments.contains("--browser-policy-hook") {
+    let input = FileHandle.standardInput.readDataToEndOfFile()
+    FileHandle.standardOutput.write(BrowserPolicy.evaluateHookJSON(input))
+    exit(0)
 }
 
 if CommandLine.arguments.contains("--selfcheck") {
