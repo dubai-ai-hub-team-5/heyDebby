@@ -461,6 +461,12 @@ func runSelfCheck() {
     assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_click",
                                   input: ["element": "Submit application", "ref": "e90"]).isDenied,
            "final submission must be handed to the user")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_click",
+                                  input: ["element": "Next", "ref": "e91", "futurePower": true]).isDenied,
+           "known tools with unknown arguments must fail closed")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_snapshot",
+                                  input: ["futurePower": true]).isDenied,
+           "observation tools must also reject unknown arguments")
     assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_fill_form", input: [
         "fields": [["name": "Password", "type": "textbox", "ref": "e13", "value": "secret"]]
     ]).isDenied, "password fields must never be filled")

@@ -15,11 +15,6 @@ enum BrowserPolicyDecision: Equatable {
 enum BrowserPolicy {
     private static let prefix = "mcp__playwright__"
 
-    private static let observationTools: Set<String> = [
-        "browser_snapshot", "browser_take_screenshot", "browser_console_messages",
-        "browser_network_requests",
-    ]
-
     private static let deniedTools: Set<String> = [
         "browser_evaluate", "browser_run_code", "browser_file_upload",
         "browser_handle_dialog", "browser_pdf_save", "browser_install",
@@ -40,27 +35,54 @@ enum BrowserPolicy {
     static func evaluate(toolName: String, input: [String: Any]) -> BrowserPolicyDecision {
         guard toolName.hasPrefix(prefix) else { return deny("Unknown browser tool") }
         let tool = String(toolName.dropFirst(prefix.count))
-        if observationTools.contains(tool) { return .allow }
         if deniedTools.contains(tool) { return deny("This browser operation is not automated") }
 
         switch tool {
+        case "browser_snapshot":
+            return input.isEmpty ? .allow : deny("Invalid snapshot request")
+
+        case "browser_take_screenshot":
+            guard keys(input, areSubsetOf: ["type", "filename", "element", "ref", "fullPage"]),
+                  input["type"] == nil || ["png", "jpeg"].contains(input["type"] as? String ?? ""),
+                  input["filename"] == nil || input["filename"] is String,
+                  input["fullPage"] == nil || input["fullPage"] is Bool else {
+                return deny("Invalid screenshot request")
+            }
+            return .allow
+
+        case "browser_console_messages":
+            guard keys(input, areSubsetOf: ["level", "filename"]),
+                  input["level"] == nil || input["level"] is String,
+                  input["filename"] == nil || input["filename"] is String else {
+                return deny("Invalid console request")
+            }
+            return .allow
+
+        case "browser_network_requests":
+            guard keys(input, areSubsetOf: ["includeStatic", "filename"]),
+                  input["includeStatic"] == nil || input["includeStatic"] is Bool,
+                  input["filename"] == nil || input["filename"] is String else {
+                return deny("Invalid network request inspection")
+            }
+            return .allow
+
         case "browser_navigate":
-            guard let raw = input["url"] as? String,
+            guard Set(input.keys) == ["url"], let raw = input["url"] as? String,
                   let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? "")
             else { return deny("Only HTTP or HTTPS navigation is allowed") }
             return .allow
 
         case "browser_navigate_back":
-            return .allow
+            return input.isEmpty ? .allow : deny("Invalid back-navigation request")
 
         case "browser_resize":
-            guard let width = integer(input["width"]), let height = integer(input["height"]),
+            guard Set(input.keys) == ["width", "height"],
+                  let width = integer(input["width"]), let height = integer(input["height"]),
                   width > 0, height > 0 else { return deny("Invalid browser size") }
             return .allow
 
         case "browser_wait_for":
-            let keys = Set(input.keys)
-            guard !keys.isEmpty, keys.isSubset(of: ["time", "text", "textGone"])
+            guard !input.isEmpty, keys(input, areSubsetOf: ["time", "text", "textGone"])
             else { return deny("Invalid wait request") }
             return .allow
 
@@ -69,30 +91,39 @@ enum BrowserPolicy {
                   ["list", "new", "select"].contains(action) else {
                 return deny("Closing browser tabs is left to the user")
             }
-            if action == "select", integer(input["index"]) == nil {
-                return deny("Invalid tab selection")
+            switch action {
+            case "select":
+                guard Set(input.keys) == ["action", "index"], integer(input["index"]) != nil
+                else { return deny("Invalid tab selection") }
+            default:
+                guard Set(input.keys) == ["action"] else { return deny("Invalid tab request") }
             }
             return .allow
 
         case "browser_hover":
-            return validTarget(input) ? .allow : deny("Invalid browser target")
+            return Set(input.keys) == ["element", "ref"] && validTarget(input)
+                ? .allow : deny("Invalid browser target")
 
         case "browser_select_option":
-            guard validTarget(input), safeLabel(input["element"]),
+            guard Set(input.keys) == ["element", "ref", "values"],
+                  validTarget(input), safeLabel(input["element"]),
                   let values = input["values"] as? [String], !values.isEmpty
             else { return deny("Unsafe or invalid option selection") }
             return .allow
 
         case "browser_click":
-            guard validTarget(input), safeLabel(input["element"]),
+            guard keys(input, areSubsetOf: ["element", "ref", "button", "doubleClick", "modifiers"]),
+                  validTarget(input), safeLabel(input["element"]),
                   (input["button"] == nil || (input["button"] as? String) == "left"),
+                  input["doubleClick"] == nil || input["doubleClick"] is Bool,
                   input["modifiers"] == nil else {
                 return deny("This click must be completed by the user")
             }
             return .allow
 
         case "browser_type":
-            guard validTarget(input), safeLabel(input["element"]),
+            guard keys(input, areSubsetOf: ["element", "ref", "text", "submit", "slowly"]),
+                  validTarget(input), safeLabel(input["element"]),
                   let text = input["text"] as? String, safeValue(text),
                   (input["submit"] as? Bool) != true,
                   input["slowly"] == nil || input["slowly"] is Bool else {
@@ -101,14 +132,15 @@ enum BrowserPolicy {
             return .allow
 
         case "browser_fill_form":
-            guard let fields = input["fields"] as? [[String: Any]], !fields.isEmpty,
+            guard Set(input.keys) == ["fields"],
+                  let fields = input["fields"] as? [[String: Any]], !fields.isEmpty,
                   fields.allSatisfy(validField) else {
                 return deny("Sensitive or invalid form fields must be completed by the user")
             }
             return .allow
 
         case "browser_press_key":
-            guard let key = input["key"] as? String,
+            guard Set(input.keys) == ["key"], let key = input["key"] as? String,
                   ["Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
                    "PageUp", "PageDown", "Home", "End", "Space"].contains(key) else {
                 return deny("This key could submit or mutate the form")
@@ -169,6 +201,10 @@ enum BrowserPolicy {
     }
 
     private static func deny(_ message: String) -> BrowserPolicyDecision { .deny(message) }
+
+    private static func keys(_ input: [String: Any], areSubsetOf allowed: Set<String>) -> Bool {
+        Set(input.keys).isSubset(of: allowed)
+    }
 
     private static func integer(_ value: Any?) -> Int? {
         if let value = value as? Int { return value }
