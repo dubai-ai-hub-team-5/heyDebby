@@ -502,12 +502,16 @@ struct NotchView: View {
                 .help(state.isListening ? "Stop & send" : "Talk to Debby (or hold ⌃⌥)")
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(headline)
-                        .font(.system(size: 13, weight: state.isListening ? .regular : .medium))
-                        .foregroundStyle(state.isListening && state.partial.isEmpty ? .secondary : .primary)
-                        .lineLimit(3)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if state.webFetch != nil {
+                        FetchingLabel()
+                    } else {
+                        Text(headline)
+                            .font(.system(size: 13, weight: state.isListening ? .regular : .medium))
+                            .foregroundStyle(state.isListening && state.partial.isEmpty ? .secondary : .primary)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -551,7 +555,8 @@ struct NotchView: View {
 
     private var headline: String {
         if state.isListening { return state.partial.isEmpty ? "Listening…" : state.partial }
-        if let w = state.webFetch { return "Fetching live from context.dev · \(w)" }
+        // A context.dev fetch is shown by FetchingLabel (the whimsical ticker), which the
+        // body swaps in whenever state.webFetch is non-nil — so no case for it here.
         if state.isThinking { return "Looking at your screen…" }
         if state.isSpeaking { return "" }  // text shown as a pill beside the cursor while speaking
         if !state.reply.isEmpty { return state.reply }
@@ -565,6 +570,34 @@ struct NotchView: View {
         }
         .buttonStyle(.plain)
         .help(tip)
+    }
+}
+
+/// The fetch ticker: while a context.dev fetch is in flight, cycle a whimsical gerund
+/// (Computing… → Sautéing… → Flibbertigibbeting…) with a soft cross-fade, so waiting on
+/// live data feels alive rather than stuck on one static line. A subtle "context.dev" tag
+/// keeps the source visible — that live-fetch moment is the whole point of the feature.
+///
+/// `TimelineView(.periodic)` drives the tick without a manual Timer or any @State to
+/// reset: the word is a pure function of the current time, so it advances on its own and
+/// stops the instant the view goes away (the fetch ends).
+struct FetchingLabel: View {
+    var interval: Double = 0.7
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: interval)) { ctx in
+            let tick = Int(ctx.date.timeIntervalSinceReferenceDate / interval)
+            HStack(spacing: 6) {
+                Text(LoadingWords.word(tick: tick) + "…")
+                    .font(.system(size: 13, weight: .medium))
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: 0.22), value: tick)
+                Text("· context.dev")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+        }
     }
 }
 
@@ -839,7 +872,7 @@ struct SettingsView: View {
     @AppStorage("voiceReplies") private var voiceReplies = true
     @AppStorage("voiceSource") private var voiceSource = ""
     @AppStorage("voiceId") private var voiceId = ""
-    @AppStorage("voiceEngine") private var voiceEngine = "system"
+    @AppStorage("voiceEngine") private var voiceEngine = "eleven"
     @AppStorage("elevenApiKey") private var elevenApiKey = ""
     @AppStorage("elevenVoiceId") private var elevenVoiceId = ""
     @AppStorage("contextApiKey") private var contextApiKey = ""

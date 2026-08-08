@@ -147,7 +147,9 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDe
     func speak(_ text: String) {
         stop()
         guard !text.isEmpty else { return }
-        let engine = UserDefaults.standard.string(forKey: "voiceEngine") ?? "system"
+        // ElevenLabs is the default engine — but a missing key falls straight through to
+        // the native voice, so Debby still speaks out of the box, before any key is pasted.
+        let engine = UserDefaults.standard.string(forKey: "voiceEngine") ?? "eleven"
         let key = Self.elevenKey()
         if engine == "eleven", !key.isEmpty { speakEleven(text, apiKey: key) }
         else { speakSystem(text) }

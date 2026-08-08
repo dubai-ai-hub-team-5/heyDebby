@@ -167,6 +167,16 @@ func runSelfCheck() {
     assert(ContextDev.parseRequest("3.14") == .search("3.14"),
            "a decimal is not a domain — no alphabetic TLD")
 
+    // --- LoadingWords: the whimsical fetch ticker ---
+    assert(!LoadingWords.all.isEmpty, "there must be words to cycle while fetching")
+    assert(Set(LoadingWords.all).count == LoadingWords.all.count, "no duplicate loading words")
+    assert(LoadingWords.shuffled.count == LoadingWords.all.count, "the shuffle keeps every word, once")
+    assert(Set(LoadingWords.shuffled) == Set(LoadingWords.all), "the shuffle drops and invents nothing")
+    // The ticker indexes by an ever-growing tick; it must wrap forever and never crash.
+    assert(LoadingWords.word(tick: 0) == LoadingWords.shuffled[0], "tick 0 is the first word")
+    assert(LoadingWords.word(tick: LoadingWords.all.count) == LoadingWords.shuffled[0], "it wraps at the end")
+    assert(!LoadingWords.word(tick: 999_999).isEmpty, "a huge tick still yields a word")
+
     // --- Control: argv, not a shell string ---
     // The executable is the branch's headline security property: swapping it for
     // /bin/zsh with a joined command string would keep every `arguments` assertion below
