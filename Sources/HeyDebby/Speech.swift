@@ -112,21 +112,8 @@ final class SpeechOutput: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDe
     /// Called on main thread when speech finishes or is cancelled.
     var onSpeakEnd: (() -> Void)?
 
-    /// Flash, not multilingual_v2: this is a voice assistant answering out loud, so time
-    /// to first audio beats fidelity. Flash v2.5 is ~75ms; multilingual_v2 is seconds.
-    /// Same pair the original Clicky ships (worker/wrangler.toml + ElevenLabsTTSClient).
-    static let defaultElevenLabsModel = "eleven_flash_v2_5"
-    static let defaultElevenLabsVoice = "kPzsL2i3teMYv0FxEYQ6" // Brittney
-
     private let synth = AVSpeechSynthesizer()
     private var currentUtterance: AVSpeechUtterance?
-    private var player: AVAudioPlayer?
-    private var wordTimer: Timer?
-    private var activeText = ""
-    private var audioFile: URL?
-    private var audioRequestID: UUID?
-    private var currentRequestID: UUID?
-    private var elevenTask: Task<Void, Never>?
 
     // ElevenLabs path: an MP3 arrives whole and plays through AVAudioPlayer. `speakGen`
     // is the identity guard (like currentUtterance ===): a fetch that returns after a

@@ -847,9 +847,6 @@ struct SettingsView: View {
     @AppStorage("appControl") private var appControl = false
     @AppStorage("browserControl") private var browserControl = false
 
-    @State private var elevenlabsVoices: [(String, String)] = []
-    @State private var loadingElevenLabsVoices = false
-
     private func voiceLabel(_ v: AVSpeechSynthesisVoice) -> String {
         let tier = v.quality == .premium ? " · premium" : v.quality == .enhanced ? " · enhanced" : ""
         return "\(v.name) (\(v.language))\(tier)"
@@ -1018,19 +1015,6 @@ struct SettingsView: View {
             ProfileSection()
         }
         .frame(width: 280)
-        .onAppear { loadElevenLabsVoices() }
-    }
-
-    private func loadElevenLabsVoices() {
-        let key = elevenlabsApiKey.isEmpty
-            ? ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"] ?? ""
-            : elevenlabsApiKey
-        guard !key.isEmpty, voiceSource == "elevenlabs" else { return }
-        loadingElevenLabsVoices = true
-        Task { @MainActor in
-            elevenlabsVoices = await SpeechOutput.elevenLabsVoices(apiKey: key)
-            loadingElevenLabsVoices = false
-        }
     }
 }
 
