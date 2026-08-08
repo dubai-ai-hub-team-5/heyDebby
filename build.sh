@@ -6,6 +6,7 @@ cd "$(dirname "$0")"
 swift build
 .build/debug/HeyDebby --selfcheck
 
+swift test
 swift build -c release
 
 APP=build/HeyDebby.app
@@ -28,6 +29,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>LSUIElement</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>Debby listens when you talk to it.</string>
     <key>NSSpeechRecognitionUsageDescription</key><string>Debby transcribes your voice questions.</string>
+    <key>NSScreenCaptureUsageDescription</key><string>Debby watches the selected screen for sourced mistakes while Watch mode is enabled.</string>
     <key>NSAppleEventsUsageDescription</key><string>Debby controls apps you ask her to — playing music, changing the volume, clicking menus.</string>
 </dict>
 </plist>

@@ -62,7 +62,8 @@ enum Codex {
     }
 
     static func send(model: String, history: [(role: String, text: String)],
-                     userText: String, imageB64: String?) async throws -> String {
+                     userText: String, imageB64: String?,
+                     onDelta: ((String) -> Void)? = nil) async throws -> String {
         let auth = try loadAuth()
 
         var input: [[String: Any]] = history.map {
@@ -103,7 +104,7 @@ enum Codex {
         req.setValue("text/event-stream", forHTTPHeaderField: "accept")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let (bytes, resp) = try await NetworkSession.streaming.bytes(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
             var errBody = ""
@@ -126,6 +127,7 @@ enum Codex {
                   let type = obj["type"] as? String else { continue }
             if type == "response.output_text.delta", let d = obj["delta"] as? String {
                 text += d
+                onDelta?(d)
             } else if type == "response.failed" {
                 let msg = ((obj["response"] as? [String: Any])?["error"] as? [String: Any])?["message"] as? String
                 throw codexErr("Codex request failed: \(msg ?? "unknown")")

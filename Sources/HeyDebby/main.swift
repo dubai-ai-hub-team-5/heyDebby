@@ -1096,7 +1096,8 @@ if CommandLine.arguments.contains("--gemini-check") {
     nonisolated(unsafe) var parsed: [ShapeSpec] = []   // handed to the main thread after sem.wait()
     Task.detached {
         let env = ProcessInfo.processInfo.environment
-        let stored = UserDefaults.standard.string(forKey: "geminiApiKey") ?? ""
+        _ = try? LegacySecretMigration.migrateUserDefaults()
+        let stored = (try? SecretStore.shared.value(for: .gemini)) ?? ""
         let key = stored.isEmpty ? (env["GOOGLE_API_KEY"] ?? env["GEMINI_API_KEY"] ?? "") : stored
         let model = env["DEBBY_MODEL"] ?? UserDefaults.standard.string(forKey: "geminiModel") ?? ""
         guard !key.isEmpty else { print("ERR: no Gemini key configured"); sem.signal(); return }
@@ -1250,6 +1251,50 @@ if CommandLine.arguments.contains("--chat-check") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--demo-preflight") {
+    _ = try? LegacySecretMigration.migrateUserDefaults()
+    let result = DemoConfiguration.preflight()
+    if result.isReady {
+        print("demo preflight OK")
+        exit(0)
+    }
+    result.failures.forEach { print("FAIL: \($0)") }
+    exit(1)
+}
+
+if CommandLine.arguments.contains("--demo-reset") {
+    _ = try? LegacySecretMigration.migrateUserDefaults()
+    let semaphore = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var succeeded = false
+    Task.detached {
+        do {
+            let configuration = try DemoConfiguration.load()
+            guard let endpoint = configuration.handoffURL else {
+                throw DemoConfigurationError.invalidHandoff
+            }
+            let token = (try? SecretStore.shared.value(for: .demoHandoff)) ?? ""
+            let executor = try DeterministicGoogleHandoffExecutor(
+                endpoint: endpoint,
+                bearerToken: token
+            )
+            let result = try await executor.execute(
+                scenarioID: configuration.scenarioID,
+                actionID: "reset-investor-revenue",
+                idempotencyKey: UUID().uuidString
+            )
+            print(result.message)
+            succeeded = true
+        } catch {
+            print("FAIL: \(error.localizedDescription)")
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    exit(succeeded ? 0 : 1)
+}
+
+DemoConfiguration.applyLaunchArguments()
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = AppState()
@@ -1258,6 +1303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Built at launch but not shown: `AppState.showRail()` orders it in when the first
     /// agent starts, and the last card's removal orders it back out.
     var rail: AgentRailWindow!
+    var talkChordMonitor: TalkChordMonitor!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -1275,20 +1321,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Warmup.begin(brain: state.backend,
                      voiceSource: UserDefaults.standard.string(forKey: "voiceSource") ?? "")
 
-        Hotkey.watchTalkChord { [weak self] down, held in
-            self?.state.talkChord(down: down, heldFor: held)
-        }
+        talkChordMonitor = TalkChordMonitor(
+            onTalkChord: { [weak self] down, held in
+                self?.state.talkChord(down: down, heldFor: held)
+            },
+            onProactiveKill: { [weak self] in
+                guard let self else { return }
+                if self.state.proactiveMuted { self.state.resumeProactiveOutput() }
+                else { self.state.killProactiveOutput() }
+            }
+        )
+        _ = talkChordMonitor.start()
+        Task { await NetworkSession.prewarm() }
 
-        // Registers the app in System Settings → Screen Recording and shows the
-        // system prompt once if not yet granted (grant requires an app relaunch).
-        if !CGPreflightScreenCaptureAccess() {
-            CGRequestScreenCaptureAccess()
+        state.permissions.refresh()
+        if state.permissions.screenRecordingAction == .prompt {
+            state.permissions.performAction(for: .screenRecording)
         }
-        // ⌃⌥ is a modifier-only chord, so it's read from the global event stream —
-        // that needs Accessibility. Prompts if missing; the grant needs a relaunch.
-        let ax = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
-        NSLog("HeyDebby: accessibility=\(ax) — ⌃⌥ hold-to-talk is dead without it")
+        if state.permissions.accessibilityAction == .prompt {
+            state.permissions.performAction(for: .accessibility)
+        }
         submitLaunchTasks()
+        if state.watchModeEnabled { Task { await state.startWatchMode() } }
     }
 
     /// `--agent "task" ["task" …]` submits tasks at launch, exactly as if they had been
@@ -1302,6 +1356,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for task in args[(i + 1)...] where !task.hasPrefix("--") {
             state.submit("agent: " + task)
         }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        state.permissions.refresh()
+        state.launchAtLogin.refresh()
+        if state.watchModeEnabled { Task { await state.startWatchMode() } }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        talkChordMonitor.stop()
     }
 
     @objc func talk() { state.toggleListening() }

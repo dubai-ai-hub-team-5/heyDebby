@@ -512,6 +512,17 @@ struct NotchView: View {
                             .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    if let intervention = state.currentIntervention,
+                       let source = intervention.sources.first {
+                        Button(action: state.openInterventionSource) {
+                            Label(source.title, systemImage: "doc.text.magnifyingglass")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.orange)
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open the cited source")
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -522,10 +533,37 @@ struct NotchView: View {
             .frame(height: 64)
 
             HStack(spacing: 14) {
-                // Confirm/Cancel for a paused agent used to live here. They are on the
-                // agent's own card now: one notch cannot hold two questions, and the run
-                // that a Confirm resumed was whichever one happened to be in the slot.
-                if state.showNext && !state.isThinking && !state.isListening {
+                if state.currentIntervention != nil {
+                    if state.interventionState == .presenting {
+                        Button(action: state.openInterventionSource) {
+                            Label("Open source", systemImage: "arrow.up.forward.app")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(.orange)
+                    } else if state.interventionState == .executing {
+                        ProgressView().controlSize(.small)
+                        Text("Working…").font(.system(size: 11, weight: .semibold))
+                    } else if case .completed(let message) = state.interventionState {
+                        Label(message, systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.green)
+                    } else {
+                        Button(action: state.runInterventionHandoff) {
+                            Label("Fix & draft update", systemImage: "wand.and.stars")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(.orange)
+                    }
+                    Button(action: state.dismissIntervention) {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss correction")
+                } else if state.showNext && !state.isThinking && !state.isListening {
                     Button { state.submit("Done — what's the next step?") } label: {
                         Label("I did it", systemImage: "checkmark.circle.fill")
                             .font(.system(size: 11, weight: .semibold))
@@ -554,7 +592,11 @@ struct NotchView: View {
     }
 
     private var headline: String {
+        if let intervention = state.currentIntervention { return intervention.message }
+        if case .failed(let message) = state.interventionState { return message }
+        if state.proactiveMuted && state.watchModeEnabled { return "Watch mode muted — Command+Shift+K to resume" }
         if state.isListening { return state.partial.isEmpty ? "Listening…" : state.partial }
+        if state.isFinalizingTranscription { return "Finishing transcript…" }
         // A context.dev fetch is shown by FetchingLabel (the whimsical ticker), which the
         // body swaps in whenever state.webFetch is non-nil — so no case for it here.
         if state.isThinking { return "Looking at your screen…" }
@@ -859,16 +901,67 @@ struct ProfileSection: View {
     }
 }
 
+struct PermissionSettingsSection: View {
+    @ObservedObject var coordinator: PermissionCoordinator
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Permissions").font(.headline)
+            ForEach(PermissionCoordinator.Permission.allCases, id: \.self) { permission in
+                HStack {
+                    Text(label(permission)).font(.system(size: 11))
+                    Spacer()
+                    if coordinator.status(for: permission).isAuthorized {
+                        Text("Granted").font(.caption).foregroundStyle(.green)
+                    } else {
+                        Button(actionLabel(permission)) {
+                            coordinator.performAction(for: permission)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
+            if coordinator.requiresRelaunch {
+                Text("Relaunch HeyDebby to apply the new screen or accessibility permission.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+        }
+        .frame(width: 260)
+    }
+
+    private func label(_ permission: PermissionCoordinator.Permission) -> String {
+        switch permission {
+        case .accessibility: return "Accessibility"
+        case .screenRecording: return "Screen Recording"
+        case .microphone: return "Microphone"
+        case .speechRecognition: return "Speech Recognition"
+        }
+    }
+
+    private func actionLabel(_ permission: PermissionCoordinator.Permission) -> String {
+        coordinator.action(for: permission) == .prompt ? "Grant" : "Open Settings"
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("backend") private var backend = ""
-    @AppStorage("apiKey") private var apiKey = ""
     @AppStorage("model") private var model = "claude-sonnet-5"
     @AppStorage("codexModel") private var codexModel = ""
-    @AppStorage("geminiApiKey") private var geminiApiKey = ""
     @AppStorage("geminiModel") private var geminiModel = ""
-    @AppStorage("openaiApiKey") private var openaiApiKey = ""
     @AppStorage("openaiModel") private var openaiModel = ""
+    @AppStorage("transcriptionProvider") private var transcriptionProvider = "auto"
+    @AppStorage("watchBackend") private var watchBackend = "auto"
+    @AppStorage("q3CloseSheetURL") private var q3CloseSheetURL = ""
+    @AppStorage("demoSlideURL") private var demoSlideURL = ""
+    @AppStorage("demoHandoffURL") private var demoHandoffURL = ""
+    @AppStorage("demoModeEnabled") private var demoModeEnabled = false
+    @State private var apiKey = ""
+    @State private var geminiApiKey = ""
+    @State private var openaiApiKey = ""
+    @State private var assemblyAIApiKey = ""
+    @State private var demoHandoffToken = ""
+    @State private var secretError = ""
     @AppStorage("voiceReplies") private var voiceReplies = true
     @AppStorage("voiceSource") private var voiceSource = ""
     @AppStorage("voiceId") private var voiceId = ""
@@ -885,14 +978,47 @@ struct SettingsView: View {
         return "\(v.name) (\(v.language))\(tier)"
     }
 
+    private func loadSecrets() {
+        apiKey = state.secretValue(for: .anthropic)
+        geminiApiKey = state.secretValue(for: .gemini)
+        openaiApiKey = state.secretValue(for: .openAI)
+        assemblyAIApiKey = state.secretValue(for: .assemblyAI)
+        demoHandoffToken = state.secretValue(for: .demoHandoff)
+    }
+
+    private func saveSecret(_ value: String, as key: SecretKey) {
+        do {
+            try state.setSecretValue(value, for: key)
+            secretError = ""
+        } catch {
+            secretError = error.localizedDescription
+        }
+    }
+
+    private func restartWatchIfNeeded() {
+        state.restartWatchMode()
+    }
+
     // Two columns, not one stack: stacked, this was taller than a laptop screen.
     var body: some View {
-        HStack(alignment: .top, spacing: 20) {
-            brainColumn
-            Divider()
-            voiceColumn
+        ScrollView {
+            HStack(alignment: .top, spacing: 20) {
+                brainColumn
+                Divider()
+                voiceColumn
+            }
+            .padding(16)
         }
-        .padding(16)
+        .frame(width: 633, height: 760)
+        .onAppear(perform: loadSecrets)
+        .onChange(of: apiKey) { _, value in saveSecret(value, as: .anthropic) }
+        .onChange(of: geminiApiKey) { _, value in saveSecret(value, as: .gemini) }
+        .onChange(of: openaiApiKey) { _, value in saveSecret(value, as: .openAI) }
+        .onChange(of: assemblyAIApiKey) { _, value in saveSecret(value, as: .assemblyAI) }
+        .onChange(of: demoHandoffToken) { _, value in saveSecret(value, as: .demoHandoff) }
+        .onChange(of: q3CloseSheetURL) { _, _ in restartWatchIfNeeded() }
+        .onChange(of: watchBackend) { _, _ in restartWatchIfNeeded() }
+        .onChange(of: demoModeEnabled) { _, _ in restartWatchIfNeeded() }
     }
 
     private var brainColumn: some View {
@@ -942,6 +1068,33 @@ struct SettingsView: View {
                 Text("Uses your ChatGPT subscription via `codex login`.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Divider()
+            Text("Proactive watch").font(.headline)
+            Toggle("Watch for mistakes on screen", isOn: Binding(
+                get: { state.watchModeEnabled },
+                set: { state.setWatchModeEnabled($0) }
+            ))
+            Picker("Watch brain", selection: $watchBackend) {
+                Text("Auto").tag("auto")
+                Text("OpenAI").tag("openai")
+                Text("Claude API").tag("claude")
+                Text("Gemini").tag("gemini")
+            }
+            .frame(width: 260)
+            TextField("Q3 close Google Sheet URL", text: $q3CloseSheetURL)
+                .frame(width: 260)
+            Toggle("Investor demo mode", isOn: $demoModeEnabled)
+            if demoModeEnabled {
+                TextField("Google Slides URL", text: $demoSlideURL)
+                    .frame(width: 260)
+                TextField("Deterministic handoff URL", text: $demoHandoffURL)
+                    .frame(width: 260)
+                SecureField("Handoff bearer token", text: $demoHandoffToken)
+                    .frame(width: 260)
+            }
+            Text("Watch checks the active display only, stays silent unless a trusted source contradicts the visible screen, and can be muted with Command+Shift+K.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(width: 260, alignment: .leading)
             Toggle("Agents: full access (skips sandbox/permissions — risky)", isOn: $agentFullAccess)
             // The toggle is not just a safety dial, it is the on switch for agents doing
             // work at all: without it they can read and use your connected apps, but not
@@ -989,6 +1142,15 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)
             }
+            Toggle("Launch at login", isOn: Binding(
+                get: { state.launchAtLogin.isEnabled },
+                set: { state.launchAtLogin.setEnabled($0) }
+            ))
+            if !state.launchAtLogin.errorMessage.isEmpty {
+                Text(state.launchAtLogin.errorMessage)
+                    .font(.caption).foregroundStyle(.red)
+                    .frame(width: 260, alignment: .leading)
+            }
             Spacer(minLength: 0)
             HStack {
                 Button("Open log…") { DebbyLog.reveal() }
@@ -1002,7 +1164,26 @@ struct SettingsView: View {
     private var voiceColumn: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Voice & apps").font(.headline)
+            PermissionSettingsSection(coordinator: state.permissions)
+            Divider()
             Toggle("Speak replies aloud", isOn: $voiceReplies)
+            Picker("Speech to text", selection: $transcriptionProvider) {
+                Text("Auto").tag("auto")
+                Text("AssemblyAI").tag("assemblyai")
+                Text("Apple Speech").tag("apple")
+            }
+            .frame(width: 260)
+            if transcriptionProvider != "apple" {
+                SecureField("AssemblyAI API key", text: $assemblyAIApiKey)
+                    .frame(width: 260)
+                Text("When AssemblyAI is selected, microphone audio is sent to AssemblyAI for transcription. Auto falls back to Apple Speech when no key is configured.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
+            }
+            if !secretError.isEmpty {
+                Text(secretError).font(.caption).foregroundStyle(.red)
+                    .frame(width: 260, alignment: .leading)
+            }
             Picker("Voice engine", selection: $voiceEngine) {
                 Text("System (macOS)").tag("system")
                 Text("ElevenLabs").tag("eleven")
@@ -1200,15 +1381,9 @@ final class DebbyPointer: ObservableObject {
     private var timer: Timer?
     private var pos = CGPoint.zero
     private var highlightTarget: CGPoint?
+    private var flightPath: PointerFlightPath?
+    private var flightStartedAt: Date?
     private var tourTask: Task<Void, Never>?
-
-    // Bezier flight, driven by the same 60fps tick as the follow-the-mouse damping.
-    // `flightTotal == 0` means "not flying" — the follow path owns the cursor.
-    private var flightFrame = 0
-    private var flightTotal = 0
-    private var flightStart = CGPoint.zero
-    private var flightControl = CGPoint.zero
-    private var flightEnd = CGPoint.zero
 
     // Window is wide enough to hold the triangle + a speech pill to its right.
     private let windowSize = CGSize(width: 400, height: 60)
@@ -1249,9 +1424,24 @@ final class DebbyPointer: ObservableObject {
         guard let w = window else { return }
         let mouse = NSEvent.mouseLocation
         state?.trackMouse(mouse)   // drives notch hover — must run every frame, flying or not
-        if flightTotal > 0 { advanceFlight(w); return }
         let tipTarget = highlightTarget ?? CGPoint(x: mouse.x + 18, y: mouse.y - 18)
         let desired = CGPoint(x: tipTarget.x - tip.x, y: tipTarget.y - tip.y)
+        if let flightPath, let flightStartedAt {
+            let progress = Date().timeIntervalSince(flightStartedAt) / flightPath.duration
+            if progress >= 1 {
+                pos = flightPath.end
+                self.flightPath = nil
+                self.flightStartedAt = nil
+                rotation = Self.restAngle
+                scale = 1
+            } else {
+                pos = flightPath.point(at: progress)
+                rotation = flightPath.rotation(at: progress)
+                scale = flightPath.scale(at: progress)
+            }
+            w.setFrameOrigin(pos)
+            return
+        }
         if abs(desired.x - pos.x) < 0.3 && abs(desired.y - pos.y) < 0.3 { return }
         pos.x += (desired.x - pos.x) * 0.18
         pos.y += (desired.y - pos.y) * 0.18
@@ -1263,65 +1453,28 @@ final class DebbyPointer: ObservableObject {
     /// auto-hide, so a tour can't outlive the marks it is touring.
     func highlight(_ points: [CGPoint]) {
         tourTask?.cancel()
+        flightPath = nil
+        flightStartedAt = nil
         guard !points.isEmpty else { return }
         tourTask = Task { [weak self] in
             for (i, p) in points.enumerated() {
                 guard !Task.isCancelled else { return }
-                self?.flyTo(p)
-                if i < points.count - 1 { try? await Task.sleep(nanoseconds: 2_400_000_000) }
+                guard let self else { return }
+                self.highlightTarget = p
+                let destination = CGPoint(x: p.x - self.tip.x, y: p.y - self.tip.y)
+                self.flightPath = PointerFlightPath(start: self.pos, end: destination)
+                self.flightStartedAt = Date()
+                if i < points.count - 1 { try? await Task.sleep(nanoseconds: 1_400_000_000) }
             }
         }
-    }
-
-    /// Starts a bezier arc toward `target`. A short hop is left to the damping in `tick`:
-    /// an arc and a swoop across 20 points reads as a glitch, not as motion.
-    private func flyTo(_ target: CGPoint) {
-        highlightTarget = target
-        let end = CGPoint(x: target.x - tip.x, y: target.y - tip.y)
-        let distance = hypot(end.x - pos.x, end.y - pos.y)
-        guard distance > 24 else { flightTotal = 0; return }
-        flightStart = pos
-        flightEnd = end
-        // Bulge the control point up-screen (+y in AppKit) so the cursor lobs rather than
-        // slides. Capped so a cross-screen flight doesn't arc off the top.
-        let arc = min(distance * 0.2, 80)
-        flightControl = CGPoint(x: (flightStart.x + end.x) / 2,
-                                y: (flightStart.y + end.y) / 2 + arc)
-        flightFrame = 0
-        flightTotal = Int(min(max(distance / 800, 0.6), 1.4) * 60)
-    }
-
-    private func advanceFlight(_ w: NSWindow) {
-        flightFrame += 1
-        guard flightFrame <= flightTotal else {
-            flightTotal = 0
-            pos = flightEnd
-            rotation = Self.restAngle
-            scale = 1
-            w.setFrameOrigin(pos)
-            return
-        }
-        let linear = CGFloat(flightFrame) / CGFloat(flightTotal)
-        let t = linear * linear * (3 - 2 * linear)   // smoothstep ease-in-out
-        let u = 1 - t
-        // Quadratic bezier B(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
-        pos = CGPoint(x: u * u * flightStart.x + 2 * u * t * flightControl.x + t * t * flightEnd.x,
-                      y: u * u * flightStart.y + 2 * u * t * flightControl.y + t * t * flightEnd.y)
-        // Face the direction of travel: the curve's tangent B'(t). AppKit is y-up and the
-        // view is y-down, so the y component flips before it becomes a screen angle.
-        let tanX = 2 * u * (flightControl.x - flightStart.x) + 2 * t * (flightEnd.x - flightControl.x)
-        let tanY = 2 * u * (flightControl.y - flightStart.y) + 2 * t * (flightEnd.y - flightControl.y)
-        // +90 because the triangle's apex points up at 0°, while atan2 calls 0° rightward.
-        rotation = atan2(-tanY, tanX) * 180 / .pi + 90
-        scale = 1 + sin(linear * .pi) * 0.3
-        w.setFrameOrigin(pos)
     }
 
     func endHighlight() {
         tourTask?.cancel()
         tourTask = nil
         highlightTarget = nil
-        flightTotal = 0
+        flightPath = nil
+        flightStartedAt = nil
         rotation = Self.restAngle
         scale = 1
     }

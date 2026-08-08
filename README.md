@@ -11,7 +11,8 @@ about what's on your screen, it answers out loud and points at things. Say
 |---|---|
 | Hotkey activation | **⌃⌥ hold-to-talk** — hold to dictate, release to send; quick-tap latches on and silence sends |
 | Sees your screen | Fresh screenshot per question via ScreenCaptureKit |
-| Talk mode (voice) | Live speech-to-text, auto-sends after 1.6s of silence |
+| Talk mode (voice) | Provider-based live speech-to-text with Apple Speech or AssemblyAI, final-transcript handoff, and silence send |
+| Proactive watch | Opt-in single-display watch mode notices sourced contradictions, speaks up, points, and rate-limits interruptions |
 | Speaks answers | **ElevenLabs** voices by default (falls back to native macOS TTS when no key is set) — ⚙︎ → Voice engine |
 | Live web data | Pulls current prices/news/pages on demand via **context.dev** — see below |
 | Screen drawing | Pulsing orange pointers + labels drawn on a click-through overlay, auto-hide in 8s |
@@ -19,7 +20,7 @@ about what's on your screen, it answers out loud and points at things. Say
 | Sits next to cursor | A 👆 companion pointer trails your cursor and glides to each marked spot to draw the highlight — **while you talk it turns into a 5-bar audio visualiser**, same spot, same size |
 | Step-by-step walkthroughs | One pointer at a time; when you click, Debby sees the new screen and points at the next step automatically ("I did it" button in the notch as fallback). ✕ ends the session |
 | Containers (focus areas) | Viewfinder button → drag a box on screen; questions are scoped to just that area (screenshot is cropped to it, pointers map back correctly) |
-| Privacy: screenshots never stored | One overwritten temp file, captured only when you ask |
+| Privacy: screenshots never archived | Purpose-sized captures use unique `0600` temporary files and are deleted when their request or agent finishes |
 
 ## The notch
 
@@ -51,7 +52,7 @@ is already signed in — Codex, then Claude — and only falls back to a paid AP
   the `claude` CLI, so no API key. The screenshot is passed as a file path and the CLI
   reads it (`--system-prompt` to replace the coding-agent persona, `--allowedTools Read`
   scoped to reading that one image). Needs `claude` signed in.
-- **Claude API key** — Anthropic API key (settings or `ANTHROPIC_API_KEY`), default
+- **Claude API key** — Anthropic API key (Keychain or `ANTHROPIC_API_KEY`), default
   model `claude-sonnet-5`.
 - **Gemini (Google AI)** — Google's Gemini with vision (settings, or `GOOGLE_API_KEY` /
   `GEMINI_API_KEY`), default `gemini-3.1-flash-lite`. Get a key at aistudio.google.com.
@@ -60,7 +61,7 @@ is already signed in — Codex, then Claude — and only falls back to a paid AP
   brain: Debby starts talking in about a second and draws each shape as she describes
   it — this is what powers realtime lessons.
 
-Agents follow the same choice: Codex agents run `codex exec` (read-only sandbox
+Direct API keys are stored in the macOS Keychain. Agents follow the same choice: Codex agents run `codex exec` (read-only sandbox
 by default; the *full access* toggle uses `--dangerously-bypass-approvals-and-sandbox`),
 Claude agents run `claude -p` (toggle adds `--dangerously-skip-permissions`).
 
@@ -122,6 +123,7 @@ First-run setup (configure):
 
 ## Usage
 
+- **Watch:** enable **Watch for mistakes on screen** in Settings, configure a direct vision key and trusted source URL, and Debby checks changed frames every few seconds. Interventions require a trusted source, use a 60-second cooldown, and can be muted or resumed with **⌘⇧K**.
 - **Talk:** hold **⌃⌥** and speak ("what does this error mean?"), release to send.
   Or quick-tap ⌃⌥ to latch listening on — it then sends after you pause. Debby
   answers aloud and draws pointers on screen when useful. While you talk, the
@@ -237,19 +239,15 @@ the Connect buttons use `claude` with a scoped `--allowedTools` instead.
 ## Deliberately skipped
 
 Typing (it's voice-only now), chat history, wake-word ("hey debby"
-always-listening), streaming for the non-OpenAI brains (only OpenAI streams today),
-a configurable hotkey, a notch per display, Windows. Add when the need is real.
+always-listening), a configurable talk hotkey, a notch per display, multi-monitor
+watch context, Windows. Add when the need is real.
 
 `./build.sh` runs `--selfcheck` (assertions are compiled out of release builds, so
 it runs the debug binary). `--notchcheck [out.png]` prints the notch geometry this
-
-Mac measured and renders the HUD offscreen to eyeball it. Headless link checks, each
-reading keys the way the app does: `--chat-check` (the full live-web-data turn:
-model → `FETCH:` → context.dev → answer), `--context-check` (`DEBBY_FETCH=<url|query>`),
-`--eleven-check`, `--codex-check`, `--gemini-check`.
-
-Mac measured and renders the HUD offscreen to eyeball it — plus `out.png.rail.png`,
-the agent rail with every card state at once.
+Mac measured and renders the HUD offscreen to eyeball it, plus `out.png.rail.png`
+with every agent-card state. Headless link checks read keys the way the app does:
+`--chat-check` (model → `FETCH:` → context.dev → answer), `--context-check`
+(`DEBBY_FETCH=<url|query>`), `--eleven-check`, `--codex-check`, and `--gemini-check`.
 
 `--agent "task" ["task" …]` starts the app with those agents already running, which is
 how you exercise the rail (several at once, hover, Confirm) without talking to it:
@@ -257,4 +255,3 @@ how you exercise the rail (several at once, hover, Confirm) without talking to i
 ```bash
 open build/HeyDebby.app --args --agent "count the files in my Downloads" "summarise my Desktop"
 ```
-
