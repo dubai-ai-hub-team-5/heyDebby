@@ -46,6 +46,7 @@ func agentOutcome(exitCode: Int32, need: String?) -> AgentRun.Status {
 @MainActor
 final class AppState: ObservableObject {
     @Published var isListening = false
+    @Published var isFinalizingTranscription = false
     @Published var partial = ""           // live transcript while listening
     @Published var isThinking = false
     @Published var webFetch: String?      // a short label of what's being pulled from context.dev, or nil
@@ -68,18 +69,30 @@ final class AppState: ObservableObject {
     @Published var isSpeaking = false     // TTS is active; pill shown near cursor
     @Published var speakingText = ""      // rolling window of words being spoken
     @Published var isDrawing = false      // screen-drawing mode active
+    @Published private(set) var proactiveMuted = false
+    @Published private(set) var interventionState: InterventionPresentationState = .idle
+    @Published private(set) var currentIntervention: Intervention?
+    @Published private(set) var watchModeEnabled = UserDefaults.standard.bool(forKey: "watchModeEnabled")
+
+    private var hasVisibleInterventionStatus: Bool {
+        if case .failed = interventionState { return true }
+        return false
+    }
 
     /// The notch opens on hover, and whenever there's something to say. Agents are
     /// deliberately absent: they have their own surface now, and a background job that
     /// held the notch open for ten minutes made the one control the user actually reaches
     /// for — the mic — sit inside a panel that was busy reporting something else.
     var notchExpanded: Bool {
-        hovering || isListening || isThinking || showNext || !reply.isEmpty
+        hovering || isListening || isFinalizingTranscription || isThinking || showNext
+            || !reply.isEmpty || currentIntervention != nil || hasVisibleInterventionStatus
     }
 
     weak var notch: NotchWindow?
     weak var rail: AgentRailWindow?
-    let speech = SpeechInput()
+    let permissions = PermissionCoordinator()
+    let launchAtLogin = LaunchAtLoginController()
+    let speech: SpeechInput
     let voice = SpeechOutput()
     let overlay = OverlayController()
     let containerOutline = ContainerOutline()
@@ -87,6 +100,10 @@ final class AppState: ObservableObject {
     let drawingController = DrawingController()
     private var history: [(role: String, text: String)] = []
     private var chatGeneration = 0
+    private var currentChatTask: Task<Void, Never>?
+    private var watchCoordinator: ScreenWatchCoordinator?
+    private var watchFrameSource: CaptureWatchedFrameSource?
+    private var hasRunningAgent: Bool { agents.contains { !$0.isFinished } }
     /// Steps drawn without the user asking. Capped: a model that never stops saying MORE would
     /// otherwise loop on the API forever.
     private var autoSteps = 0
@@ -103,8 +120,19 @@ final class AppState: ObservableObject {
     /// Raw stream text as far as it got, so a lesson that dies mid-flight can still tell
     /// history what it already drew.
     private var partialReply = ""
+    private let secretStore: SecretStoring
 
-    init() {
+    init(secretStore: SecretStoring = SecretStore.shared) {
+        self.secretStore = secretStore
+        self.speech = SpeechInput(secretStore: secretStore)
+        if secretStore === SecretStore.shared {
+            _ = try? LegacySecretMigration.migrateUserDefaults(to: secretStore)
+        }
+        let storedAssemblyAIKey = (try? secretStore.value(for: .assemblyAI)) ?? ""
+        permissions.updateAssemblyAIConfiguration(
+            isConfigured: !storedAssemblyAIKey.isEmpty
+                || !(ProcessInfo.processInfo.environment["ASSEMBLYAI_API_KEY"] ?? "").isEmpty
+        )
         overlay.onHide = { [weak self] in
             self?.pointer.endHighlight()
             self?.showNext = false
@@ -124,6 +152,7 @@ final class AppState: ObservableObject {
                 self?.isSpeaking = false
                 self?.speakingText = ""
                 self?.lessonPlayer?.speechFinished()
+                self?.resumeWatchModeIfPossible()
             }
         }
         drawingController.onStop = { [weak self] in
@@ -131,10 +160,24 @@ final class AppState: ObservableObject {
         }
     }
 
-    var apiKey: String {
-        let stored = UserDefaults.standard.string(forKey: "apiKey") ?? ""
-        return stored.isEmpty ? (ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? "") : stored
+    func secretValue(for key: SecretKey) -> String {
+        if let stored = try? secretStore.value(for: key), !stored.isEmpty { return stored }
+        for name in key.environmentVariableNames {
+            if let value = ProcessInfo.processInfo.environment[name], !value.isEmpty { return value }
+        }
+        return ""
     }
+
+    func setSecretValue(_ value: String, for key: SecretKey) throws {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { try secretStore.removeValue(for: key) }
+        else { try secretStore.setValue(trimmed, for: key) }
+        if key == .assemblyAI {
+            permissions.updateAssemblyAIConfiguration(isConfigured: !trimmed.isEmpty)
+        }
+    }
+
+    var apiKey: String { secretValue(for: .anthropic) }
     var model: String {
         let m = UserDefaults.standard.string(forKey: "model") ?? ""
         return m.isEmpty ? "claude-sonnet-5" : m
@@ -156,21 +199,13 @@ final class AppState: ObservableObject {
         let m = UserDefaults.standard.string(forKey: "codexModel") ?? ""
         return m.isEmpty ? Codex.defaultModel : m
     }
-    /// Same order All-In-One-AI uses (`gemini_api_key()`), so one exported key feeds both.
-    var geminiApiKey: String {
-        let stored = UserDefaults.standard.string(forKey: "geminiApiKey") ?? ""
-        guard stored.isEmpty else { return stored }
-        let env = ProcessInfo.processInfo.environment
-        return env["GOOGLE_API_KEY"] ?? env["GEMINI_API_KEY"] ?? ""
-    }
+    var geminiApiKey: String { secretValue(for: .gemini) }
     var geminiModel: String {
         let m = UserDefaults.standard.string(forKey: "geminiModel") ?? ""
         return m.isEmpty ? Gemini.defaultModel : m
     }
-    var openaiApiKey: String {
-        let stored = UserDefaults.standard.string(forKey: "openaiApiKey") ?? ""
-        return stored.isEmpty ? (ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? "") : stored
-    }
+    var openaiApiKey: String { secretValue(for: .openAI) }
+    var assemblyAIApiKey: String { secretValue(for: .assemblyAI) }
     var openaiModel: String {
         let m = UserDefaults.standard.string(forKey: "openaiModel") ?? ""
         return m.isEmpty ? OpenAI.defaultModel : m
@@ -235,20 +270,262 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// ✕ / status-item stop: end the *conversation*. Agents are not part of it.
-    ///
-    /// Both this and `newChat` used to kill background work — dismiss by terminating the
-    /// gated run, newChat by terminating every process it knew about. That made sense when
-    /// the notch was the only place an agent could report: an agent nobody could see had to
-    /// be stopped when the user moved on, or it ran unsupervised forever. The rail makes
-    /// them visible and individually stoppable, so ending a chat no longer has any business
-    /// killing a ten-minute job that is halfway through writing a file.
+    func setWatchModeEnabled(_ enabled: Bool) {
+        watchModeEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "watchModeEnabled")
+        if enabled {
+            proactiveMuted = false
+            Task { await startWatchMode() }
+        } else {
+            let coordinator = watchCoordinator
+            watchCoordinator = nil
+            watchFrameSource = nil
+            Task { await coordinator?.stop() }
+            voice.stop()
+            overlay.hide()
+            pointer.endHighlight()
+            currentIntervention = nil
+            reply = ""
+            interventionState = .idle
+        }
+    }
+
+    func restartWatchMode() {
+        guard watchModeEnabled else { return }
+        let coordinator = watchCoordinator
+        watchCoordinator = nil
+        watchFrameSource = nil
+        voice.stop()
+        overlay.hide()
+        pointer.endHighlight()
+        currentIntervention = nil
+        reply = ""
+        Task {
+            await coordinator?.stop()
+            await startWatchMode()
+        }
+    }
+
+    func startWatchMode() async {
+        guard watchModeEnabled, !proactiveMuted else { return }
+        if let watchCoordinator {
+            guard currentIntervention == nil, !isListening, !isFinalizingTranscription,
+                  !isSpeaking, !hasRunningAgent else { return }
+            await watchCoordinator.resume()
+            return
+        }
+        guard permissions.screenRecordingStatus.isAuthorized else {
+            interventionState = .failed("Screen Recording permission is required")
+            return
+        }
+        let sourceText = UserDefaults.standard.string(forKey: "q3CloseSheetURL") ?? ""
+        guard let sourceURL = URL(string: sourceText), SourceReference.isValidHTTPSURL(sourceURL) else {
+            interventionState = .failed("Add the Q3 close sheet URL in Settings")
+            return
+        }
+        do {
+            let evidenceProvider = try InvestorGoogleWorkspaceGroundTruthProvider(
+                q3CloseSheetURL: sourceURL
+            )
+            let evaluator = try await makeInterventionEvaluator(evidenceProvider: evidenceProvider)
+            let screen = activeScreen ?? NSScreen.underMouse
+            let frameSource = CaptureWatchedFrameSource(displayID: screen.displayID)
+            let coordinator = ScreenWatchCoordinator(
+                frameSource: frameSource,
+                evaluator: evaluator,
+                evidenceProvider: evidenceProvider,
+                onIntervention: { [weak self] intervention in
+                    self?.present(intervention: intervention, on: screen)
+                },
+                onStatusChange: { [weak self] status in
+                    guard let self, self.currentIntervention == nil else { return }
+                    switch status {
+                    case .stopped: self.interventionState = .idle
+                    case .running: self.interventionState = .watching
+                    case .paused: break
+                    }
+                },
+                onTiming: { timing in DebbyLog.write(timing.logLine) }
+            )
+            watchFrameSource = frameSource
+            watchCoordinator = coordinator
+            interventionState = .watching
+            await coordinator.start()
+        } catch {
+            interventionState = .failed(error.localizedDescription)
+        }
+    }
+
+    func pauseWatchMode() {
+        Task { await watchCoordinator?.pause() }
+    }
+
+    func resumeWatchModeIfPossible() {
+        guard watchModeEnabled, !proactiveMuted, currentIntervention == nil,
+              !isListening, !isFinalizingTranscription, !isSpeaking, !hasRunningAgent else { return }
+        Task { await watchCoordinator?.resume() }
+    }
+
+    func openInterventionSource() {
+        guard let intervention = currentIntervention, let source = intervention.sources.first else { return }
+        NSWorkspace.shared.open(source.url)
+        interventionState = .sourceOpened
+    }
+
+    func runInterventionHandoff() {
+        guard let intervention = currentIntervention else { return }
+        interventionState = .executing
+        if UserDefaults.standard.bool(forKey: "demoModeEnabled") || !Claude.CLI.isLoggedIn {
+            runDeterministicHandoff(interventionID: intervention.id)
+            return
+        }
+        let slideURL = UserDefaults.standard.string(forKey: "demoSlideURL") ?? "the currently open Google Slides presentation"
+        let sourceURL = intervention.sources.first?.url.absoluteString ?? "the configured Q3 close sheet"
+        let task = """
+        In Google Workspace, update the investor presentation at \(slideURL) so the visible Q3 revenue figure is 2.4 million instead of 4.2 million. Verify it against \(sourceURL). Then create, but do not send, a Gmail draft to finance explaining the corrected figure and citing the Q3 close sheet. Do not change anything else. Print the final slide and draft links.
+        """
+        runAgent(task, browserOverride: true) { [weak self] code in
+            guard let self else { return }
+            if code == 0 {
+                self.interventionState = .completed("Slide corrected · Draft ready")
+            } else {
+                self.runDeterministicHandoff(interventionID: intervention.id)
+            }
+        }
+    }
+
+    private func runDeterministicHandoff(interventionID: UUID) {
+        let endpointText = UserDefaults.standard.string(forKey: "demoHandoffURL") ?? ""
+        let token = secretValue(for: .demoHandoff)
+        guard let endpoint = URL(string: endpointText) else {
+            interventionState = .failed("Configure the deterministic handoff endpoint")
+            return
+        }
+        Task {
+            do {
+                let executor = try DeterministicGoogleHandoffExecutor(
+                    endpoint: endpoint,
+                    bearerToken: token
+                )
+                let result = try await executor.execute(
+                    scenarioID: "investor-revenue",
+                    actionID: "fix-slide-and-draft-finance-update",
+                    idempotencyKey: interventionID.uuidString
+                )
+                interventionState = .completed(result.message)
+                if let url = result.artifactURLs.first { NSWorkspace.shared.open(url) }
+            } catch {
+                interventionState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    func dismissIntervention() {
+        voice.stop()
+        overlay.hide()
+        pointer.endHighlight()
+        currentIntervention = nil
+        reply = ""
+        interventionState = watchModeEnabled ? .watching : .idle
+        resumeWatchModeIfPossible()
+    }
+
+    func killProactiveOutput() {
+        proactiveMuted = true
+        Task { await watchCoordinator?.pause() }
+        voice.stop()
+        overlay.hide()
+        pointer.endHighlight()
+        currentIntervention = nil
+        interventionState = .muted
+        isSpeaking = false
+        speakingText = ""
+        reply = ""
+    }
+
+    func resumeProactiveOutput() {
+        proactiveMuted = false
+        interventionState = watchModeEnabled ? .watching : .idle
+        resumeWatchModeIfPossible()
+    }
+
+    private func present(intervention: Intervention, on screen: NSScreen) {
+        guard !proactiveMuted, currentIntervention == nil else { return }
+        currentIntervention = intervention
+        interventionState = .presenting
+        reply = intervention.message
+        let point = Annotation(
+            x: intervention.annotation.x,
+            y: intervention.annotation.y,
+            label: intervention.annotation.label
+        )
+        overlay.show([point], on: screen)
+        let frame = screen.frame
+        pointer.highlight([CGPoint(
+            x: frame.minX + intervention.annotation.x * frame.width,
+            y: frame.minY + (1 - intervention.annotation.y) * frame.height
+        )])
+        if voiceReplies, let source = intervention.sources.first {
+            voice.speak("\(intervention.message) — from \(source.title).")
+        }
+        pauseWatchMode()
+    }
+
+    private func makeInterventionEvaluator(
+        evidenceProvider: InvestorGoogleWorkspaceGroundTruthProvider
+    ) async throws -> any InterventionEvaluator {
+        if UserDefaults.standard.bool(forKey: "demoModeEnabled") {
+            let evidence = try await evidenceProvider.evidence()
+            let annotation = try InterventionAnnotation(
+                x: 0.62, y: 0.38, label: "Revenue figure"
+            )
+            let intervention = try Intervention(
+                title: "Revenue mismatch",
+                message: "That's 2.4 million, not 4.2 million",
+                confidence: 1,
+                annotation: annotation,
+                sources: evidence.sources,
+                suggestedAction: .openSource(evidence.sources[0].id)
+            )
+            return ScriptedInterventionEvaluator(verdicts: [.intervene(intervention)])
+        }
+
+        let preference = UserDefaults.standard.string(forKey: "watchBackend") ?? "auto"
+        if preference == "openai" || preference == "auto", !openaiApiKey.isEmpty {
+            return DirectHTTPJSONInterventionEvaluator(
+                adapter: OpenAIInterventionAdapter(apiKey: openaiApiKey, model: openaiModel)
+            )
+        }
+        if preference == "claude" || preference == "auto", !apiKey.isEmpty {
+            return DirectHTTPJSONInterventionEvaluator(
+                adapter: AnthropicInterventionAdapter(apiKey: apiKey, model: model)
+            )
+        }
+        if preference == "gemini" || preference == "auto", !geminiApiKey.isEmpty {
+            return DirectHTTPJSONInterventionEvaluator(
+                adapter: GeminiInterventionAdapter(apiKey: geminiApiKey, model: geminiModel)
+            )
+        }
+        throw NSError(domain: "intervention", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Configure a direct vision API key for Watch mode"
+        ])
+    }
+
+    /// ✕ / status-item stop: end the *conversation*. Background agents keep running on
+    /// their own rail; proactive UI for the current conversation is dismissed with it.
     func dismiss() {
         chatGeneration += 1
+        currentChatTask?.cancel()
+        currentChatTask = nil
         pendingAdvance?.cancel()
         pendingAdvance = nil
         fadeTask?.cancel()
-        if isListening { _ = speech.stop(); isListening = false; partial = "" }
+        if isListening || isFinalizingTranscription {
+            _ = speech.stop()
+            isListening = false
+            isFinalizingTranscription = false
+            partial = ""
+        }
         voice.stop()
         lessonPlayer?.cancel()
         lessonPlayer = nil
@@ -267,6 +544,8 @@ final class AppState: ObservableObject {
 
     func newChat() {
         chatGeneration += 1
+        currentChatTask?.cancel()
+        currentChatTask = nil
         pendingAdvance?.cancel()
         pendingAdvance = nil
         disarmClickWatch()
@@ -366,6 +645,9 @@ final class AppState: ObservableObject {
     }
 
     func startListening() {
+        pauseWatchMode()
+        currentChatTask?.cancel()
+        currentChatTask = nil
         voice.stop()
         lessonPlayer?.cancel()
         lessonPlayer = nil
@@ -378,6 +660,7 @@ final class AppState: ObservableObject {
         partial = ""
         reply = ""
         levels = [CGFloat](repeating: 0, count: levels.count)
+        isFinalizingTranscription = false
         isListening = true
         speech.start(
             onPartial: { [weak self] t in Task { @MainActor in self?.partial = t } },
@@ -390,6 +673,7 @@ final class AppState: ObservableObject {
             onError: { [weak self] msg in Task { @MainActor in
                 guard let self else { return }
                 self.isListening = false
+                self.isFinalizingTranscription = false
                 self.partial = ""
                 self.show("🎤 \(msg)")
             } }
@@ -398,16 +682,15 @@ final class AppState: ObservableObject {
 
     func stopListeningAndSend() {
         guard isListening else { return }
-        let text = speech.stop()
         isListening = false
-        partial = ""
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !t.isEmpty { submit(t) }
+        isFinalizingTranscription = true
+        speech.finalize()
     }
 
     private func finishListening(with text: String) {
-        guard isListening else { return }
+        guard isListening || isFinalizingTranscription else { return }
         isListening = false
+        isFinalizingTranscription = false
         partial = ""
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !t.isEmpty { submit(t) }
@@ -415,7 +698,12 @@ final class AppState: ObservableObject {
 
     func submit(_ text: String, auto: Bool = false) {
         chatGeneration += 1   // newest request wins; a stale reply must not install a player
-        if isListening { _ = speech.stop(); isListening = false; partial = "" }
+        if isListening || isFinalizingTranscription {
+            _ = speech.stop()
+            isListening = false
+            isFinalizingTranscription = false
+            partial = ""
+        }
         voice.stop()
         lessonPlayer?.cancel()
         lessonPlayer = nil
@@ -464,28 +752,38 @@ final class AppState: ObservableObject {
         let webData = hasWebData
         debbyWebData = webData
         let ctxKey = contextApiKey
-        Task {
+        currentChatTask?.cancel()
+        currentChatTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.chatGeneration == gen { self.currentChatTask = nil }
+            }
             do {
                 // An auto-advance step changes nothing on screen except our own drawing,
                 // and the screenshot excludes our windows — so there is nothing new to see.
                 let shot = withShot
-                    ? try await Capture.screen(excludingSelf: true, cropTo: snapContainer,
+                    ? try await Capture.screen(for: .assistantRequest, cropTo: snapContainer,
                                                displayID: screen.displayID)
                     : Capture.Shot(base64: "", filePath: "")
+                defer { shot.cleanup() }
                 // One brain call for a given prompt. `useShot` only on the first turn: a
                 // FETCH follow-up re-asks with the same screen already described, plus data.
-                // The openai case streams — the lesson has played by the time it returns; only
-                // the raw text comes back, for history and for spotting a FETCH request.
+                // Streaming brains have played the lesson by the time they return; only the
+                // raw text comes back, for history and for spotting a FETCH request.
                 // @MainActor so the streamLesson call stays on the actor talk() already runs on.
                 @MainActor func callBrain(_ userText: String, useShot: Bool) async throws -> String {
                     let b64 = useShot ? shot.base64 : ""
                     let path = useShot ? shot.filePath : ""
                     switch brain {
-                    case "codex":     return try await Codex.send(model: codexModel, history: history, userText: userText, imageB64: b64)
+                    case "codex", "openai", "claude":
+                        return try await streamLesson(brain: brain, gen: gen,
+                                                      container: snapContainer, screen: screen,
+                                                      text: userText, imageB64: b64)
                     case "claudecli": return try await Claude.CLI.send(history: history, userText: userText, imagePath: path)
                     case "gemini":    return try await Gemini.send(apiKey: geminiApiKey, model: geminiModel, history: history, userText: userText, imageB64: b64)
-                    case "openai":    return try await streamLesson(gen: gen, container: snapContainer, screen: screen, text: userText, imageB64: b64)
-                    default:          return try await Claude.send(apiKey: apiKey, model: model, history: history, userText: userText, imageB64: b64)
+                    default: throw NSError(domain: "chat", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "Unknown brain: \(brain)"
+                    ])
                     }
                 }
 
@@ -547,7 +845,7 @@ final class AppState: ObservableObject {
                 if history.count > 20 { history.removeFirst(history.count - 20) }
                 // The streamed brain already played this lesson while it arrived; parsing and
                 // playing it a second time here would say every sentence twice.
-                if brain != "openai" {
+                if !["openai", "codex", "claude"].contains(brain) {
                     show(clean)
                     // Snapshot once: voiceReplies can change mid-lesson, and a player built for
                     // speech must not have onSay start reading a live flag that later says "off"
@@ -562,7 +860,7 @@ final class AppState: ObservableObject {
                     player.closeStream()
                 }
             } catch {
-                guard gen == chatGeneration else { return }
+                guard !Task.isCancelled, gen == chatGeneration else { return }
                 isThinking = false
                 DebbyLog.write("CHAT ERROR (\(brain)) \(error.localizedDescription)")
                 // A half-played lesson would keep narrating over the error: every onSay writes
@@ -580,6 +878,7 @@ final class AppState: ObservableObject {
                     if history.count > 20 { history.removeFirst(history.count - 20) }
                 }
                 show("⚠️ \(error.localizedDescription)")
+                resumeWatchModeIfPossible()
             }
         }
     }
@@ -587,7 +886,7 @@ final class AppState: ObservableObject {
     /// Streams a reply straight into a player, returning the raw text for history.
     /// The splitter is a local `var` captured by the delta closure — legal, and simpler
     /// than threading it back out through an `inout` parameter.
-    private func streamLesson(gen: Int, container: CGRect?, screen: NSScreen,
+    private func streamLesson(brain: String, gen: Int, container: CGRect?, screen: NSScreen,
                               text: String, imageB64: String) async throws -> String {
         // Same snapshot the whole-reply path takes, for the same reason: onSay must never
         // read a live voiceReplies that can flip to "off" mid-lesson and leave the player
@@ -621,33 +920,52 @@ final class AppState: ObservableObject {
         }
 
         var raw = ""
-        try await OpenAI.stream(apiKey: openaiApiKey, model: openaiModel, history: history,
-                                userText: text, imageB64: imageB64) { [weak self] chunk in
+        let onDelta: (String) -> Void = { [weak self] chunk in
             raw += chunk
             let beats = sp.feed(chunk)
             guard !beats.isEmpty else { return }
-            // Copy on this thread: `raw` keeps growing here, and reading it from the hop
-            // below would be a read racing an append.
             let soFar = raw
-            // onDelta lands on a URLSession queue; the player and every @Published flag are
-            // main-only. DispatchQueue.main, not Task {}, because the hop has to preserve
-            // order — the main queue guarantees FIFO, unstructured tasks do not, and beats
-            // that arrive out of order are a shape drawn before the sentence that explains it.
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    // Identity, not just generation: cancel() empties the queue but leaves the
-                    // player willing to work, this closure holds it strongly, and
-                    // startListening() is the one cancel path that does NOT bump the
-                    // generation. Without the `===` an interrupted lesson resurrects — shapes
-                    // drawn, click-watch armed, and a fresh sentence spoken straight into the
-                    // microphone that is now recording the user.
                     guard let self, self.lessonPlayer === player,
                           self.chatGeneration == gen else { return }
-                    self.isThinking = false  // she's already talking; stop saying "thinking"
+                    self.isThinking = false
                     self.partialReply = soFar
                     player.append(beats)
                 }
             }
+        }
+        switch brain {
+        case "openai":
+            try await OpenAI.stream(
+                apiKey: openaiApiKey,
+                model: openaiModel,
+                history: history,
+                userText: text,
+                imageB64: imageB64,
+                onDelta: onDelta
+            )
+        case "codex":
+            _ = try await Codex.send(
+                model: codexModel,
+                history: history,
+                userText: text,
+                imageB64: imageB64,
+                onDelta: onDelta
+            )
+        case "claude":
+            _ = try await Claude.send(
+                apiKey: apiKey,
+                model: model,
+                history: history,
+                userText: text,
+                imageB64: imageB64,
+                onDelta: onDelta
+            )
+        default:
+            throw NSError(domain: "stream", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Streaming is unavailable for \(brain)"
+            ])
         }
         // Resumes on the main actor behind every hop above — same queue, still in order.
         let tail = sp.finish()
@@ -708,7 +1026,11 @@ final class AppState: ObservableObject {
         }
         // The lesson advances when the narration actually ends, not on a timer.
         player.onIdle = { [weak self] in
-            guard let self, self.chatGeneration == gen, more() else { return }
+            guard let self, self.chatGeneration == gen else { return }
+            guard more() else {
+                self.resumeWatchModeIfPossible()
+                return
+            }
             guard self.autoSteps < self.maxAutoSteps else {
                 DebbyLog.write("AUTO-STEP cap (\(self.maxAutoSteps)) hit — stopping the lesson")
                 return
@@ -751,7 +1073,10 @@ final class AppState: ObservableObject {
     ///
     /// `run` is passed in only by `confirm(_:)`, which reattaches to a paused session on
     /// the card that already exists rather than opening a second one for the same job.
-    private func runAgent(_ task: String, resuming run: AgentRun? = nil) {
+    private func runAgent(_ task: String, resuming run: AgentRun? = nil,
+                          browserOverride: Bool? = nil,
+                          onCompletion: ((Int32) -> Void)? = nil) {
+        pauseWatchMode()
         // Made before the agent starts, not by the agent, so `workNote` can promise the
         // folder is already there — an agent that has to mkdir its own output directory
         // sometimes decides it would rather use the home directory instead.
@@ -766,22 +1091,28 @@ final class AppState: ObservableObject {
         railReapers.removeValue(forKey: agent.id)?.cancel()
         let displayID = (activeScreen ?? NSScreen.underMouse).displayID
         Task {
-            let shotPath = (try? await Capture.screen(excludingSelf: true, displayID: displayID))?.filePath
+            let shot = try? await Capture.screen(for: .agentContext, displayID: displayID)
+            let shotPath = shot?.filePath
             // Terminated between the card appearing and the screenshot returning — a real
             // window, since a capture takes a moment and Stop is one click away.
-            guard agent.status == .running else { return }
+            guard agent.status == .running else { shot?.cleanup(); return }
             agent.process = AgentRunner.run(
                 backend: agentBackend, task: task, screenshotPath: shotPath,
                 fullAccess: agentFullAccess, appControl: appControl,
-                session: agent.session, resume: resume, browser: browserControl,
+                session: agent.session, resume: resume,
+                browser: browserOverride ?? browserControl,
                 onOutput: { [weak self, weak agent] chunk in Task { @MainActor in
                     guard let agent else { return }
                     if let question = agent.absorb(chunk) { self?.announce(question) }
                 } },
-                onDone: { [weak self, weak agent] code in Task { @MainActor in
+                onDone: { [weak self, weak agent, shot] code in
+                    shot?.cleanup()
+                    Task { @MainActor in
                     guard let self, let agent else { return }
                     if let late = agent.finish(exitCode: code) { self.announce(late) }
                     self.reap(agent)
+                    onCompletion?(code)
+                    self.resumeWatchModeIfPossible()
                 } }
             )
         }

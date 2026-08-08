@@ -281,7 +281,8 @@ enum Claude {
     }
 
     static func send(apiKey: String, model: String, history: [(role: String, text: String)],
-                     userText: String, imageB64: String) async throws -> String {
+                     userText: String, imageB64: String,
+                     onDelta: ((String) -> Void)? = nil) async throws -> String {
         var messages: [[String: Any]] = history.map { ["role": $0.role, "content": $0.text] }
         // An empty base64 data field is a hard 400 (same failure mode as Gemini's inlineData
         // and OpenAI's input_image) — omit the image block entirely when there's no shot.
@@ -291,12 +292,13 @@ enum Claude {
         }
         userContent.append(["type": "text", "text": userText])
         messages.append(["role": "user", "content": userContent])
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "max_tokens": 1024,
             "system": systemPrompt,
             "messages": messages,
         ]
+        if onDelta != nil { body["stream"] = true }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         req.httpMethod = "POST"
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
@@ -304,8 +306,35 @@ enum Claude {
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+        if let onDelta {
+            let (bytes, response) = try await NetworkSession.streaming.bytes(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard status == 200 else {
+                var detail = ""
+                for try await line in bytes.lines where detail.count < 2_000 { detail += line }
+                throw NSError(domain: "claude", code: status, userInfo: [
+                    NSLocalizedDescriptionKey: "API error \(status): \(detail)"
+                ])
+            }
+            var text = ""
+            for try await line in bytes.lines {
+                guard line.hasPrefix("data:") else { continue }
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                guard let object = try? JSONSerialization.jsonObject(
+                    with: Data(payload.utf8)
+                ) as? [String: Any],
+                      object["type"] as? String == "content_block_delta",
+                      let delta = object["delta"] as? [String: Any],
+                      delta["type"] as? String == "text_delta",
+                      let chunk = delta["text"] as? String else { continue }
+                text += chunk
+                onDelta(chunk)
+            }
+            return text
+        }
+
+        let (data, response) = try await NetworkSession.shared.data(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
             let apiMsg = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
                 .flatMap { ($0["error"] as? [String: Any])?["message"] as? String }

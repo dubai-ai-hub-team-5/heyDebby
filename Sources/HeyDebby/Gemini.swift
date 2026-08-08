@@ -44,7 +44,7 @@ enum Gemini {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await NetworkSession.shared.data(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
             let errMsg = ((try? JSONSerialization.jsonObject(with: data))

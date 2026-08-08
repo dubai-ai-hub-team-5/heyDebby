@@ -53,7 +53,7 @@ enum OpenAI {
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let (bytes, resp) = try await NetworkSession.streaming.bytes(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
             // The error body arrives down the same byte stream; without draining it the

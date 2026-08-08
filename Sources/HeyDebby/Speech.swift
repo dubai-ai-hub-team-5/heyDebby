@@ -10,97 +10,219 @@ func rms(_ buffer: AVAudioPCMBuffer) -> Float {
     return (sum / Float(n)).squareRoot()
 }
 
+@MainActor
 final class SpeechInput {
     private let engine = AVAudioEngine()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
+    private let secretStore: SecretStoring
+    private var session: (any TranscriptionSession)?
     private var latest = ""
     private var silenceTimer: Timer?
+    private var generation = 0
+    private var tapInstalled = false
+    private var finalizeWhenReady = false
+    private var finalHandler: ((String) -> Void)?
+    private var errorHandler: ((String) -> Void)?
+
+    init(secretStore: SecretStoring = SecretStore.shared) {
+        self.secretStore = secretStore
+    }
 
     func start(onPartial: @escaping (String) -> Void,
                onFinal: @escaping (String) -> Void,
                onLevel: @escaping (Float) -> Void,
                onError: @escaping (String) -> Void) {
-        SFSpeechRecognizer.requestAuthorization { [weak self] auth in
-            DispatchQueue.main.async {
-                guard auth == .authorized else {
-                    onError("Speech recognition not authorized (System Settings → Privacy & Security)")
+        cancel()
+        generation += 1
+        let currentGeneration = generation
+        latest = ""
+        finalHandler = onFinal
+        errorHandler = onError
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard await self.requestMicrophoneAccess() else {
+                    throw AppleSpeechTranscriptionProviderError(message: "Microphone permission is required.")
+                }
+                let selection = self.providerSelection()
+                let activeSession: any TranscriptionSession
+                do {
+                    activeSession = try await self.startSession(
+                        provider: selection.provider,
+                        generation: currentGeneration,
+                        onPartial: onPartial
+                    )
+                } catch {
+                    guard selection.canFallBackToApple else { throw error }
+                    activeSession = try await self.startSession(
+                        provider: AppleSpeechTranscriptionProvider(),
+                        generation: currentGeneration,
+                        onPartial: onPartial
+                    )
+                }
+                guard self.generation == currentGeneration else {
+                    activeSession.cancel()
                     return
                 }
-                self?.begin(onPartial: onPartial, onFinal: onFinal, onLevel: onLevel, onError: onError)
-            }
-        }
-    }
-
-    private func begin(onPartial: @escaping (String) -> Void,
-                       onFinal: @escaping (String) -> Void,
-                       onLevel: @escaping (Float) -> Void,
-                       onError: @escaping (String) -> Void) {
-        guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
-            onError("Speech recognizer unavailable")
-            return
-        }
-        latest = ""
-        let req = SFSpeechAudioBufferRecognitionRequest()
-        req.shouldReportPartialResults = true
-        request = req
-        let input = engine.inputNode
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in
-            req.append(buffer)
-            let level = rms(buffer)
-            DispatchQueue.main.async { onLevel(level) }
-        }
-        engine.prepare()
-        do { try engine.start() } catch {
-            onError("Mic error: \(error.localizedDescription)")
-            return
-        }
-        task = recognizer.recognitionTask(with: req) { [weak self] result, error in
-            guard let self else { return }
-            if let result {
-                self.latest = result.bestTranscription.formattedString
-                onPartial(self.latest)
-                DispatchQueue.main.async { self.bumpSilenceTimer(onFinal: onFinal) }
-            }
-            if error != nil {
-                DispatchQueue.main.async {
-                    guard self.task != nil else { return }  // normal stop/cancel already tore down
-                    self.teardown()
-                    onError("Listening stopped — tap the mic to try again.")
+                self.session = activeSession
+                let input = self.engine.inputNode
+                input.removeTap(onBus: 0)
+                input.installTap(onBus: 0, bufferSize: 1024,
+                                 format: input.outputFormat(forBus: 0)) { buffer, _ in
+                    activeSession.append(buffer)
+                    let level = rms(buffer)
+                    DispatchQueue.main.async { onLevel(level) }
                 }
+                self.tapInstalled = true
+                self.engine.prepare()
+                try self.engine.start()
+                if self.finalizeWhenReady { self.finalize() }
+            } catch {
+                guard self.generation == currentGeneration else { return }
+                self.finishWithError(error.localizedDescription)
             }
         }
     }
 
-    // Auto-send after 1.6s of silence following speech.
-    private func bumpSilenceTimer(onFinal: @escaping (String) -> Void) {
+    func finalize() {
         silenceTimer?.invalidate()
-        silenceTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            let text = self.latest
-            self.teardown()
-            onFinal(text)
+        silenceTimer = nil
+        stopAudio()
+        guard let session else {
+            finalizeWhenReady = true
+            return
         }
+        finalizeWhenReady = false
+        session.finalize()
     }
 
-    /// Manual stop; returns whatever was transcribed.
+    func cancel() {
+        generation += 1
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+        stopAudio()
+        session?.cancel()
+        session = nil
+        latest = ""
+        finalizeWhenReady = false
+        finalHandler = nil
+        errorHandler = nil
+    }
+
     func stop() -> String {
         let text = latest
-        teardown()
+        cancel()
         return text
     }
 
-    private func teardown() {
+    private func startSession(provider: any TranscriptionProvider, generation: Int,
+                              onPartial: @escaping (String) -> Void) async throws
+        -> any TranscriptionSession {
+        if provider.metadata.requiresSpeechRecognitionPermission {
+            guard await requestSpeechRecognitionAccess() else {
+                throw AppleSpeechTranscriptionProviderError(
+                    message: "Speech recognition permission is required."
+                )
+            }
+        }
+        return try await provider.startSession(
+            contextualKeyterms: ["HeyDebby", "Google Slides", "Google Sheets"],
+            onPartial: { [weak self] text in
+                Task { @MainActor in
+                    guard let self, self.generation == generation else { return }
+                    self.latest = text
+                    onPartial(text)
+                    self.bumpSilenceTimer()
+                }
+            },
+            onFinal: { [weak self] text in
+                Task { @MainActor in
+                    guard let self, self.generation == generation else { return }
+                    self.finish(with: text)
+                }
+            },
+            onError: { [weak self] error in
+                Task { @MainActor in
+                    guard let self, self.generation == generation else { return }
+                    self.finishWithError(error.localizedDescription)
+                }
+            }
+        )
+    }
+
+    private func providerSelection() -> (provider: any TranscriptionProvider, canFallBackToApple: Bool) {
+        let preference = UserDefaults.standard.string(forKey: "transcriptionProvider") ?? "auto"
+        let key = ((try? secretStore.value(for: .assemblyAI)) ?? nil)
+            ?? ProcessInfo.processInfo.environment["ASSEMBLYAI_API_KEY"]
+        if preference == "assemblyai" {
+            return (AssemblyAITranscriptionProvider(apiKey: key ?? ""), false)
+        }
+        if preference == "auto", let key, !key.isEmpty {
+            return (AssemblyAITranscriptionProvider(apiKey: key), true)
+        }
+        return (AppleSpeechTranscriptionProvider(), false)
+    }
+
+    private func bumpSilenceTimer() {
         silenceTimer?.invalidate()
         silenceTimer = nil
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        request?.endAudio()
-        task?.cancel()
-        task = nil
-        request = nil
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: false) {
+            [weak self] _ in Task { @MainActor in self?.finalize() }
+        }
+    }
+
+    private func finish(with text: String) {
+        let handler = finalHandler
+        stopAudio()
+        session = nil
         latest = ""
+        finalizeWhenReady = false
+        finalHandler = nil
+        errorHandler = nil
+        handler?(text)
+    }
+
+    private func finishWithError(_ message: String) {
+        let handler = errorHandler
+        stopAudio()
+        session?.cancel()
+        session = nil
+        latest = ""
+        finalizeWhenReady = false
+        finalHandler = nil
+        errorHandler = nil
+        handler?(message.isEmpty ? "Listening stopped — tap the mic to try again." : message)
+    }
+
+    private func stopAudio() {
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        engine.stop()
+    }
+
+    private func requestMicrophoneAccess() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
+            }
+        default: return false
+        }
+    }
+
+    private func requestSpeechRecognitionAccess() async -> Bool {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized: return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization {
+                    continuation.resume(returning: $0 == .authorized)
+                }
+            }
+        default: return false
+        }
     }
 }
 
