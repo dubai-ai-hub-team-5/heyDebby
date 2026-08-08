@@ -345,6 +345,31 @@ func runSelfCheck() {
     assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false, appControl: true)
             .contains("osascript"), "codex agents are unaffected")
 
+    // --- private process logging: callers receive output, disk does not ---
+    let privateRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("heydebby-log-selfcheck-\(UUID().uuidString)", isDirectory: true)
+    let privateLog = privateRoot.appendingPathComponent("debby.log")
+    let privateSink = LogSink(url: privateLog)
+    let privateDone = DispatchSemaphore(value: 0)
+    let privateOutput = OutputBox()
+    _ = AgentRunner.spawn("printf 'PRIVATE-SENTINEL'", logging: .privateOutput(label: "profile scan"),
+                          logSink: privateSink,
+                          onOutput: { privateOutput.append($0) },
+                          onDone: { _ in privateDone.signal() })
+    assert(privateDone.wait(timeout: .now() + 5) == .success,
+           "private-output process did not finish")
+    assert(privateOutput.text == "PRIVATE-SENTINEL", "private output must still reach its caller")
+    let privateDisk = (try? String(contentsOf: privateLog, encoding: .utf8)) ?? ""
+    assert(privateDisk.contains("RUN profile scan") && privateDisk.contains("EXIT profile scan 0"),
+           "private log must retain generic lifecycle metadata: \(privateDisk)")
+    assert(!privateDisk.contains("PRIVATE-SENTINEL") && !privateDisk.contains("printf"),
+           "private log must contain neither command nor child output: \(privateDisk)")
+    let privateDirMode = ((try? FileManager.default.attributesOfItem(atPath: privateRoot.path)[.posixPermissions]) as? NSNumber)?.intValue
+    let privateFileMode = ((try? FileManager.default.attributesOfItem(atPath: privateLog.path)[.posixPermissions]) as? NSNumber)?.intValue
+    assert(privateDirMode == 0o700 && privateFileMode == 0o600,
+           "log directory/file permissions must be 0700/0600, got \(String(describing: privateDirMode))/\(String(describing: privateFileMode))")
+    try? FileManager.default.removeItem(at: privateRoot)
+
     // --- agent session id / resume ---
     let uuid = "0F8E4B10-3C2A-4D5E-9F01-2A3B4C5D6E7F"
     let first = agentCommand(backend: "claude", task: "renew my passport",

@@ -111,6 +111,11 @@ final class OutputBox: @unchecked Sendable {
     var text: String { lock.lock(); defer { lock.unlock() }; return buf }
 }
 
+enum ProcessLogging {
+    case standard
+    case privateOutput(label: String)
+}
+
 // Background agents = Codex CLI (ChatGPT subscription) or Claude Code CLI.
 enum AgentRunner {
     /// Returns the running process so callers can terminate it (nil if launch failed).
@@ -150,10 +155,25 @@ enum AgentRunner {
     }
 
     @discardableResult
-    static func spawn(_ command: String, onOutput: @escaping (String) -> Void,
+    static func spawn(_ command: String, logging: ProcessLogging = .standard,
+                      logSink: LogSink? = nil, onOutput: @escaping (String) -> Void,
                       onDone: @escaping (Int32) -> Void) -> Process? {
         let cmd = command + " 2>&1"
-        DebbyLog.write("RUN \(command)")
+        func logWrite(_ text: String) {
+            if let logSink { logSink.write(text) } else { DebbyLog.write(text) }
+        }
+        func logRaw(_ text: String) {
+            if let logSink { logSink.raw(text) } else { DebbyLog.raw(text) }
+        }
+        let privateLabel: String?
+        switch logging {
+        case .standard:
+            privateLabel = nil
+            logWrite("RUN \(command)")
+        case .privateOutput(let label):
+            privateLabel = label
+            logWrite("RUN \(label)")
+        }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
         proc.arguments = ["-lc", cmd]
@@ -205,13 +225,14 @@ enum AgentRunner {
                 return
             }
             if let s = String(data: d, encoding: .utf8) {
-                DebbyLog.raw(s)   // stream it: a run that hangs still leaves a trail
+                if privateLabel == nil { logRaw(s) }
                 onOutput(s)
             }
         }
         proc.terminationHandler = { p in
             exitCode = p.terminationStatus
-            DebbyLog.write("EXIT \(p.terminationStatus)")
+            if let privateLabel { logWrite("EXIT \(privateLabel) \(p.terminationStatus)") }
+            else { logWrite("EXIT \(p.terminationStatus)") }
             group.leave()
             // A few seconds is plenty for a pipe that's actually drained (EOF normally
             // arrives within milliseconds of exit); past that, a descendant is still
@@ -221,7 +242,7 @@ enum AgentRunner {
                 let stillWaiting = !finished
                 doneLock.unlock()
                 if stillWaiting {
-                    DebbyLog.write("EOF grace period expired — proceeding with partial output")
+                    logWrite("EOF grace period expired — proceeding with partial output")
                     pipe.fileHandleForReading.readabilityHandler = nil
                 }
                 finishOnce()

@@ -788,6 +788,7 @@ final class AppState: ObservableObject {
         let out = OutputBox()
         AgentRunner.spawn(cliPathPrefix + "claude -p \(shellQuote(prompt)) "
                           + "--allowedTools Read Glob Grep",
+                          logging: .privateOutput(label: "profile scan"),
                           onOutput: { [weak self] chunk in
                               out.append(chunk)
                               Task { @MainActor in self?.agentTick(chunk) }
