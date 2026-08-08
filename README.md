@@ -12,7 +12,7 @@ about what's on your screen, it answers out loud and points at things. Say
 | Hotkey activation | **⌃⌥ hold-to-talk** — hold to dictate, release to send; quick-tap latches on and silence sends |
 | Sees your screen | Fresh screenshot per question via ScreenCaptureKit |
 | Talk mode (voice) | Live speech-to-text, auto-sends after 1.6s of silence |
-| Speaks answers | Native TTS by default, or **ElevenLabs** voices (⚙︎ → Voice engine) |
+| Speaks answers | **ElevenLabs** voices by default (falls back to native macOS TTS when no key is set) — ⚙︎ → Voice engine |
 | Live web data | Pulls current prices/news/pages on demand via **context.dev** — see below |
 | Screen drawing | Pulsing orange pointers + labels drawn on a click-through overlay, auto-hide in 8s |
 | Background agents | "agent: clean my downloads" → runs Codex CLI (`codex exec`) or [Claude Code](https://claude.com/claude-code) (`claude -p`) in the background; the newest output line tickers in the notch |
@@ -74,10 +74,11 @@ it are in [TECH-SPEC.md](./TECH-SPEC.md).
   citing the source. So *"is this cheaper anywhere else?"* is answered from the web as
   it is right now, not from training data. On behind a context.dev key (⚙︎ → Live web
   data, or `CONTEXT_API_KEY`).
-- **Natural voice (ElevenLabs).** Switch ⚙︎ → Voice engine to **ElevenLabs** for
-  streamed, natural speech (default voice *Sarah*, any Voice ID works). Any failure
-  falls straight back to the native macOS voice, so Debby never goes silent. Key in
-  settings or `ELEVENLABS_API_KEY`.
+- **Natural voice (ElevenLabs) — the default.** Debby speaks with **ElevenLabs** out of
+  the box (⚙︎ → Voice engine is set to **ElevenLabs** by default, voice *Sarah*, any Voice
+  ID works). Add the key in settings or `ELEVENLABS_API_KEY`; until then — and on any
+  failure — she falls straight back to the native macOS voice, so she never goes silent.
+  Switch ⚙︎ → Voice engine to **System (macOS)** to stay on the native voice.
 - **Realtime lessons — draw while talking.** With the OpenAI brain, replies stream:
   Debby starts speaking in ~1s and each shape appears *as* she narrates it (a queue
   keeps the drawing in step with the voice), instead of drawing everything up front.
