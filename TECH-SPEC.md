@@ -86,9 +86,9 @@ other file is a focused capability it calls into.
 5. **Parse** — the reply is a stream of one-marker-per-line beats (§2.6):
    prose to speak, `POINT:`/`DRAW:` to render, `RUN:` to execute, `FETCH:` to pull
    live web data (§2.4), `MORE:` to continue a multi-step walkthrough.
-6. **Answer** — `Speech.swift` speaks — the native `AVSpeechSynthesis` voice by
-   default, or a streamed **ElevenLabs** voice (§2.4) — and `UI.swift` draws pulsing
-   pointers and shapes on a transparent, click-through overlay that auto-hides in 8s.
+6. **Answer** — `Speech.swift` speaks — a streamed **ElevenLabs** voice by default
+   (§2.4), falling back to the native `AVSpeechSynthesis` voice — and `UI.swift` draws
+   pulsing pointers and shapes on a transparent, click-through overlay that auto-hides in 8s.
 
 ### 2.3 Brains — five backends, one interface
 
@@ -125,18 +125,55 @@ data" is expressed as a marker, exactly like `DRAW:`/`RUN:`:
    brain, which now answers from live data and cites the source. Capped at two rounds
    so a model that keeps asking can't loop forever.
 
+Who talks to context.dev, and when — the two passes of the `FETCH:` loop
+(`Context.swift` is the only thing that ever touches the API):
+
+```
+┌── PASS 1 · FETCH (get the live data) ─────────────────────────────────────────┐
+│                                                                                │
+│   USER ──⌃⌥ "is this cheaper anywhere?" + screenshot──▶  AppState             │
+│                                                          (Context.swift)       │
+│                                          ① prompt + shot │                     │
+│                                                          ▼                     │
+│                                                        BRAIN (LLM)             │
+│                              ② reply is ONLY a marker,   │                     │
+│                                 no prose:                ▼                     │
+│                                 "FETCH: <url>"         AppState ──③ HTTPS──┐    │
+│                                 "FETCH: search: <q>"                       │    │
+│                                                                           ▼    │
+│    ┌─────────────────────────────────────────────────────────────────────┐   │
+│    │  context.dev            base:  https://api.context.dev/v1             │   │
+│    │  (third-party web       auth:  Authorization: Bearer <CONTEXT_API_KEY>│   │
+│    │   context API)          ─────────────────────────────────────────────│   │
+│    │   • GET  /web/scrape/markdown?url=<page>   ─▶  clean, LLM-ready MD     │   │
+│    │   • POST /web/search      { "query": … }   ─▶  ranked results + snips  │   │
+│    └─────────────────────────────────┬───────────────────────────────────┘   │
+│                                       │ ④ live web data — the page as it is    │
+│                                       ▼    *now* — folded back into the prompt  │
+│                                     AppState                                    │
+└────────────────────────────────────────────────────────────────────────────────┘
+┌── PASS 2 · ANSWER (from the live data, ≤ 2 rounds total) ──────────────────────┐
+│                                                                                │
+│   AppState ──⑤ question + live data, "answer & cite the source"──▶ BRAIN (LLM) │
+│                                                                        │       │
+│   USER ◀──⑦ TTS + on-screen overlay──  AppState ◀──⑥ answer, cites src─┘       │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
 This is what makes "changes mid-conversation" literal: every turn can fetch the page
 as it is *now*. `FETCH:` is offered to the model (`debbyWebData`, gating the prompt
 section) only when a context.dev key is configured — a model told it can fetch when
-it can't would promise data it never gets. During a fetch the notch shows
-*"Fetching live from context.dev · <host/query>"*, so the source is visible, not
-hidden behind a generic spinner. `ContextDev.parseRequest` (URL vs. query) is a pure
-function, covered by `--selfcheck`.
+it can't would promise data it never gets. During a fetch the notch cycles a
+whimsical, ever-changing gerund (`Computing…` → `Sautéing…` → `Flibbertigibbeting…`,
+from `LoadingWords.swift`) with a `· context.dev` tag, so the wait feels alive and the
+source stays visible — not a generic spinner. `ContextDev.parseRequest` (URL vs.
+query) is a pure function, covered by `--selfcheck`.
 
-**Voice — ElevenLabs.** `SpeechOutput` (in `Speech.swift`) speaks through the native
-`AVSpeechSynthesizer` by default, or streams from ElevenLabs (`Eleven.swift`,
-`POST /v1/text-to-speech/{voice}`, `xi-api-key`) when the voice engine is set to it
-and a key exists (settings or `ELEVENLABS_API_KEY`). An MP3 arrives whole and plays
+**Voice — ElevenLabs (the default).** `SpeechOutput` (in `Speech.swift`) speaks through
+ElevenLabs by default (`Eleven.swift`, `POST /v1/text-to-speech/{voice}`, `xi-api-key`),
+using the key from settings or `ELEVENLABS_API_KEY`; with no key — or on any failure —
+it falls straight back to the native `AVSpeechSynthesizer`. An MP3 arrives whole and plays
 through `AVAudioPlayer`; the same `onSpeakStart`/`onSpeakEnd` callbacks fire either
 way, so the `LessonPlayer` that waits on end-of-speech behaves identically. **Any
 failure — bad key, unknown voice, dropped connection — falls straight back to the
