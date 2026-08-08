@@ -623,9 +623,9 @@ final class AppState: ObservableObject {
             }
             self.drawingController.shapes.append(shape)
         }
-        player.onRun = { [weak self] script in
+        player.onAction = { [weak self] action in
             guard let self, self.chatGeneration == gen, self.appControl else { return }
-            Control.run([script]) { [weak self] code, out in
+            Control.run(action) { [weak self] code, out in
                 // osascript can take seconds; a new chat may already have started by the
                 // time it returns. Recheck, same as onIdle does after its own async gap —
                 // a stale error must not land on top of a conversation it isn't about.

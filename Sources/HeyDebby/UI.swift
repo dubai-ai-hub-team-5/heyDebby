@@ -925,15 +925,9 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Toggle("Agents: full access (skips sandbox/permissions — risky)", isOn: $agentFullAccess)
-            Toggle("Let Debby control apps (volume, Spotify, menus)", isOn: $appControl)
-            Text("Debby runs short AppleScript commands. macOS asks permission the first "
-                 + "time she talks to a named app, in Privacy & Security → Automation — "
-                 + "some commands, like volume, don't go through that gate at all.")
-                .font(.caption).foregroundStyle(.secondary)
-                .frame(width: 260, alignment: .leading)
-            Text("Once you allow an app, Debby can control it fully, not just the one thing "
-                 + "you asked for. She also decides what to run from what's on your screen, "
-                 + "so a web page or email can influence it. Leave this off unless you want that.")
+            Toggle("Let Debby control volume and media", isOn: $appControl)
+            Text("Debby can change volume and control play/pause, next, or previous in "
+                 + "Music and Spotify. These are fixed actions, not generated scripts.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(width: 260, alignment: .leading)
             Toggle("Let Debby fill forms in a real browser (Playwright)", isOn: Binding(

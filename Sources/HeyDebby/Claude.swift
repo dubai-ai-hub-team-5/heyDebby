@@ -75,7 +75,7 @@ func parseReply(_ text: String) -> ParsedReply {
 /// this number the model cannot make a square look square or a perpendicular be perpendicular.
 nonisolated(unsafe) var debbyScreenAspect: Double = 16.0 / 10.0
 
-/// Set from AppState before each request. The RUN: documentation is omitted when app
+/// Set from AppState before each request. The ACTION: documentation is omitted when app
 /// control is off — a model told about a marker the app will drop narrates actions that
 /// never happen.
 nonisolated(unsafe) var debbyAppControl = false
@@ -165,32 +165,18 @@ enum Claude {
     private static let runPrompt = """
 
 
-    You can control the user's Mac. To do something in an app, put a line of its own:
-    RUN: set volume output volume 60
-    RUN: tell application "Spotify" to play track "spotify:track:4cOdK2wGLETKBW3PvgPWqT"
-    One AppleScript statement per line, no ``` fences. It runs the moment you get to it, \
-    so put the line right after the sentence that announces it — say what you are doing, \
-    then do it. Anything scriptable works, and `tell application "System Events" to \
-    keystroke …` or `click menu item …` reaches apps that are not.
+    You can perform these short Mac actions by putting one JSON line directly after the \
+    sentence that announces it:
+    ACTION: {"type":"set_volume","value":60}
+    ACTION: {"type":"change_volume","value":-10}
+    ACTION: {"type":"media","app":"spotify","command":"play_pause"}
 
-    Each RUN line runs on its own, and two of them may finish out of order — never rely on \
-    one finishing before the next starts. If one action depends on another, do both in a \
-    single statement instead: `tell application "Spotify" to play track \
-    "spotify:track:4cOdK2wGLETKBW3PvgPWqT"` both activates Spotify and plays the track — one \
-    line, not two.
-
-    NEVER use `do shell script`, `do script`, `run script`, or `load script` — those are \
-    refused. NEVER write a RUN line naming Terminal, iTerm or Script Editor either, not \
-    even just to activate one — same refusal. NEVER use `display dialog` — also refused, \
-    because it can pop a native-looking prompt with a masked input field. Debby never asks \
-    the user for a password or other personal details in a popup; if a task seems to need \
-    one, say so out loud and let the user do it themselves — don't emit a RUN line for it, \
-    it will just vanish. A refused line is dropped silently: nothing runs and nothing tells \
-    you it didn't, so if asked to open a terminal or run a shell command, say you can't — \
-    don't emit a RUN line for it either. NEVER use RUN to delete files, send mail or \
-    messages, or spend money. For anything destructive or multi-step, tell the user to \
-    start it with "agent" instead — that's the right place for it, since the user asked for \
-    it explicitly and can watch it run.
+    `set_volume` accepts 0 through 100. `change_volume` accepts -20 through 20. `media` \
+    accepts only `music` or `spotify`, with `play_pause`, `next`, or `previous`. Use exactly \
+    those keys and values, one action per line, with no ``` fences. You cannot write \
+    AppleScript, shell commands, keystrokes, menu clicks, messages, file operations, or \
+    other app commands. For anything outside this list, tell the user to start it with \
+    "agent" instead.
     """
 
     private static let basePromptPart2 = """
@@ -207,7 +193,7 @@ enum Claude {
     """
 
     /// The app-control-off wording ("you cannot act on apps yourself") would directly
-    /// contradict the RUN: section above it once app control is on, so this paragraph has
+    /// contradict the ACTION: section above it once app control is on, so this paragraph has
     /// two variants rather than one fixed one — see `agentPromptRunOn`.
     private static let agentPrompt = """
 
@@ -223,7 +209,7 @@ enum Claude {
     private static let agentPromptRunOn = """
 
 
-    RUN handles one scriptable action in one app. For anything bigger — a multi-step task, or \
+    ACTION handles one supported volume or media action. For anything bigger — a multi-step task, or \
     an app that isn't scriptable but has a Composio integration (Gmail, Calendar, Notion, Slack, \
     GitHub and more) — tell the user to say or type "agent: <the task>" instead.
     """

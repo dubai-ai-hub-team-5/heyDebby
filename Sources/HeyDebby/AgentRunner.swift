@@ -30,14 +30,8 @@ func agentCommand(backend: String, task: String, screenshotPath: String?,
     }
     // Without an allowlist `claude -p` denies every tool, so an app task fails silently.
     // --allowedTools is variadic: it must be last, and the prompt must precede it.
-    // Bash(osascript:*) is scoped rather than bare Bash deliberately: an agent that can
-    // run AppleScript is a much smaller grant than one that can run anything — but an
-    // agent's osascript call runs raw, never through BeatSplitter's refusal list, so it
-    // is only handed out when the user has app control switched on. Off by default in
-    // Settings means off here too, not a second door that skips the toggle.
     var tools = "mcp__composio Read Glob Grep"
     if browser { tools += " mcp__playwright" }
-    if appControl { tools += " Bash(osascript:*)" }
     let settingsFlag = settingsPath.map { " --settings \(shellQuote($0))" } ?? ""
     return "claude -p\(sessionFlag)\(settingsFlag) \(shellQuote(prompt)) --allowedTools \(tools)"
 }
