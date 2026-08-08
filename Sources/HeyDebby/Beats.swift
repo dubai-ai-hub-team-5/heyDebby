@@ -135,6 +135,9 @@ struct BeatSplitter {
             }
             return out
         }
+        // Old model-authored AppleScript must not fall through and be spoken after an
+        // upgrade. It is intentionally discarded without logging the payload.
+        if Self.payload(l, "RUN:") != nil { return flushProse() }
         if let target = Self.payload(l, "FETCH:") {
             let out = flushProse()   // the sentence before a marker is finished by it
             if target.isEmpty { DebbyLog.write("BEAT FETCH: empty payload") }
