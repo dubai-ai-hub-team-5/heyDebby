@@ -1,55 +1,55 @@
 import Foundation
 
-/// Runs AppleScript for the `RUN:` marker.
-///
-/// This exists instead of reusing `AgentRunner.spawn` because that path goes through
-/// `zsh -lc`, where one quoting bug turns a model-written line into arbitrary shell.
-/// Here the statement is an argument to `/usr/bin/osascript` and can only ever be
-/// AppleScript.
+/// Executes only validated `AppAction` values. Model-authored text never reaches argv.
 enum Control {
-    /// The executable statements are run through — never a shell. This is the branch's
-    /// headline security property (argv, not a shell string), so it is a `static let`
-    /// rather than inlined in `run`, and a test pins it: swapping this to `/bin/zsh` with
-    /// a joined command string would pass every `arguments` assertion but reopen the hole.
     static let executablePath = "/usr/bin/osascript"
 
-    /// The argv osascript gets: one `-e` per statement, in order.
-    static func arguments(for statements: [String]) -> [String] {
-        statements.flatMap { ["-e", $0] }
+    static func arguments(for action: AppAction) -> [String] {
+        let statement: String
+        switch action {
+        case .setVolume(let value):
+            statement = "set volume output volume \(value)"
+        case .changeVolume(let delta):
+            statement = """
+            set currentVolume to output volume of (get volume settings)
+            set targetVolume to currentVolume + \(delta)
+            if targetVolume < 0 then set targetVolume to 0
+            if targetVolume > 100 then set targetVolume to 100
+            set volume output volume targetVolume
+            """
+        case .media(let app, let command):
+            let application = app == .music ? "Music" : "Spotify"
+            let verb: String
+            switch command {
+            case .playPause: verb = "playpause"
+            case .next: verb = "next track"
+            case .previous: verb = "previous track"
+            }
+            statement = "tell application \"\(application)\" to \(verb)"
+        }
+        return ["-e", statement]
     }
 
-    /// Runs the statements and reports the exit code plus whatever osascript printed.
-    /// Output is stderr-and-stdout combined: AppleScript errors arrive on stderr and are
-    /// the entire diagnosis when an app is not running or Automation was denied.
-    ///
-    /// `onDone` always lands on the main queue — every exit path hops there, since the
-    /// caller is `@MainActor` UI code.
-    static func run(_ statements: [String], onDone: @escaping (Int32, String) -> Void) {
-        guard !statements.isEmpty else {
-            return DispatchQueue.main.async { onDone(0, "") }
-        }
+    /// Runs one typed action and reports the exit code plus osascript output.
+    /// `onDone` always lands on the main queue because the caller owns UI state.
+    static func run(_ action: AppAction, onDone: @escaping (Int32, String) -> Void) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executablePath)
-        proc.arguments = arguments(for: statements)
+        proc.arguments = arguments(for: action)
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
         proc.standardInput = FileHandle.nullDevice
-        // Reading only in terminationHandler would deadlock: osascript blocks once the
-        // ~64KB pipe buffer fills, so it never exits and terminationHandler never fires.
-        // Drain as data arrives instead, same as AgentRunner.spawn.
-        // ponytail: output accumulates entirely in memory — fine for a line or two of
-        // AppleScript output; cap it here if a statement is ever seen printing megabytes.
         let box = OutputBox()
         pipe.fileHandleForReading.readabilityHandler = { h in
-            let d = h.availableData
-            if !d.isEmpty, let s = String(data: d, encoding: .utf8) { box.append(s) }
+            let data = h.availableData
+            if !data.isEmpty, let text = String(data: data, encoding: .utf8) { box.append(text) }
         }
-        DebbyLog.write("RUN osascript \(statements.joined(separator: " ; "))")
+        DebbyLog.write("ACTION \(action)")
         proc.terminationHandler = { p in
             pipe.fileHandleForReading.readabilityHandler = nil
             let text = box.text
-            DebbyLog.write("RUN exit \(p.terminationStatus) \(text.prefix(200))")
+            DebbyLog.write("ACTION exit \(p.terminationStatus) \(text.prefix(200))")
             DispatchQueue.main.async { onDone(p.terminationStatus, text) }
         }
         do {

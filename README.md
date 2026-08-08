@@ -15,7 +15,7 @@ about what's on your screen, it answers out loud and points at things. Say
 | Speaks answers | Native TTS by default, or **ElevenLabs** voices (⚙︎ → Voice engine) |
 | Live web data | Pulls current prices/news/pages on demand via **context.dev** — see below |
 | Screen drawing | Pulsing orange pointers + labels drawn on a click-through overlay, auto-hide in 8s |
-| Background agents | "agent: clean my downloads" → runs Codex CLI (`codex exec`) or [Claude Code](https://claude.com/claude-code) (`claude -p`) in the background; the newest output line tickers in the notch |
+| Background agents | "agent: clean my downloads" → runs Codex CLI (`codex exec`) or [Claude Code](https://claude.com/claude-code) (`claude -p`) in the background. Each gets a pill on the right edge of the screen; hover to watch it work. Run as many as you like and keep talking to Debby meanwhile. With *full access* (below) an agent has a shell, so the job is anything a command can do |
 | Sits next to cursor | A 👆 companion pointer trails your cursor and glides to each marked spot to draw the highlight — **while you talk it turns into a 5-bar audio visualiser**, same spot, same size |
 | Step-by-step walkthroughs | One pointer at a time; when you click, Debby sees the new screen and points at the next step automatically ("I did it" button in the notch as fallback). ✕ ends the session |
 | Containers (focus areas) | Viewfinder button → drag a box on screen; questions are scoped to just that area (screenshot is cropped to it, pointers map back correctly) |
@@ -26,8 +26,11 @@ about what's on your screen, it answers out loud and points at things. Say
 Every control lives in the notch, not in a window. It sits flush over the camera
 housing (a slim pill on displays without one) and is **click-through until your
 cursor touches it** — the menu bar underneath keeps working. It opens on hover,
-and by itself whenever there's something to show: listening, thinking, an answer,
-an agent running.
+and by itself whenever there's something to show: listening, thinking, an answer.
+
+Agents are the one thing it doesn't show — they have the rail (below). A ten-minute
+background job used to hold the notch open the whole time, which put the mic inside a
+panel busy reporting something else.
 
 Open, left to right: mic (click = talk), live transcript or Debby's last answer,
 mic bars — then **I did it** (next walkthrough step), **⌖** focus area,
@@ -123,9 +126,68 @@ First-run setup (configure):
   answers aloud and draws pointers on screen when useful. While you talk, the
   companion pointer becomes a live audio visualiser so you can see it hearing you.
 - **Agents:** start with "agent", "agent:", or "hey debby agent" — e.g.
-  *"agent: summarize the PDFs on my Desktop"*. Runs from your home directory,
-  read-mostly by default; enable *full access* in settings to let them modify
-  things without prompts (risky — off by default).
+  *"agent: summarize the PDFs on my Desktop"*. Runs from your home directory.
+
+## The agent rail
+
+Every agent gets a pill down the right edge of the screen saying what you asked for.
+**Hover one** and it opens into a card: the last few lines of output as they stream, how
+long it's been going, and a **Stop** button. Move away and it shrinks back. The strip is
+click-through everywhere except the pills themselves, so the window underneath keeps
+working.
+
+Agents are independent of the conversation. Start as many as you like, keep talking to
+Debby while they run, ask her something else — none of it disturbs them. Neither ✕ nor
+**Start over** stops an agent; only its own **Stop** does. (Both used to kill every running
+agent, back when the notch was the only place one could report.)
+
+Colours: white running, **orange** waiting on you, green done, red failed. A finished card
+clears itself after a few seconds; a failed one stays until you dismiss it, because the
+exit code and the last lines are the whole diagnosis.
+
+When an agent hits something irreversible — submitting a form, sending a payment — it stops
+and asks. The question appears on that agent's own card with **Confirm** and **Cancel**, and
+Debby reads it aloud. Confirm resumes the exact session that asked, so two agents waiting at
+once can't get their answers crossed.
+
+## What agents can actually do
+
+Read-only by default, and that is a real limit, not a soft one: an agent can read your
+files and use your connected apps, but it cannot create or change anything on this Mac.
+Ask a read-only agent for a spreadsheet and it will do the thinking, then tell you in one
+line that the rest needs **⚙︎ → Agents: full access**. It won't report success over a job
+that never happened.
+
+With **full access** on it can finish the job — and anything else, without prompts. That
+one toggle is both the on switch and the whole safety story; there is no middle setting.
+Off by default.
+
+There's no list of supported tasks, because the capability isn't a set of integrations —
+it's a shell. Usually that means Debby writes a small Python script and runs it, so the job
+is whatever a script can do: an Excel workbook, a PowerPoint deck, a Word document, a PDF,
+a chart, a converted folder of images, a database query, a thousand renamed files. Any
+library it needs that isn't installed it fetches for that run only (`uv run --with …`,
+`uvx …`), so nothing is left behind on your Mac afterwards. The script is kept next to what
+it produced, so you can re-run or tweak it without asking again.
+
+Finished work lands in **`~/Debby`** and is opened for you when it's done. Output is the
+real format rather than a lookalike — a genuine `.xlsx` with working formulas, a real
+`.pptx`, not something with the wrong extension — and files are built by writing them,
+never by remote-controlling Excel or PowerPoint through AppleScript, which needs an
+Automation grant, breaks with the app closed, and can clobber unsaved edits. Agents check
+their own work before reporting it done. Try *"agent: turn the receipts in my Downloads
+into a spreadsheet of what I spent"* or *"agent: make a deck from the notes on my
+Desktop"*.
+
+`~/Debby` is where output *goes*, not a sandbox: `--dangerously-skip-permissions` scopes
+nothing, so a full-access agent can write anywhere. The folder buys predictability, not
+containment.
+
+One thing Debby pins on your behalf: `--allowedTools` *adds to* your own
+`~/.claude/settings.json` rather than replacing it, so a `permissions.defaultMode` of
+`auto` there would quietly hand every "read-only" agent write access. Debby passes
+`--permission-mode manual` so its agents behave the same on every Mac, whatever your
+claude CLI is configured to do.
 
 ## Requirements
 
@@ -161,10 +223,10 @@ which is far too big a hammer for connecting an app. `claude` takes
 
 ## When something doesn't work
 
-**⚙︎ → Open log…** — `~/Library/Logs/HeyDebby/debby.log`. Every CLI invocation Debby
-makes is recorded: the full command, the output verbatim as it streams, and the exit
-code. Streaming matters — a run that hangs still leaves a trail. Trimmed to the last
-500 KB once it passes 2 MB. Local only, but it does contain your prompts.
+**⚙︎ → Open log…** — `~/Library/Logs/HeyDebby/debby.log`. Ordinary CLI invocations record
+the full command, streamed output, and exit code. Document/profile scans are private: only
+their generic start and exit status are logged, never the scan prompt or extracted values.
+The log is trimmed to the last 500 KB once it passes 2 MB and is readable only by your user.
 
 The failure worth knowing about: `user cancelled MCP tool call` means `codex exec`
 auto-denied a Composio *write* (send an email, create a connection). Codex can't
@@ -179,7 +241,19 @@ a configurable hotkey, a notch per display, Windows. Add when the need is real.
 
 `./build.sh` runs `--selfcheck` (assertions are compiled out of release builds, so
 it runs the debug binary). `--notchcheck [out.png]` prints the notch geometry this
+
 Mac measured and renders the HUD offscreen to eyeball it. Headless link checks, each
 reading keys the way the app does: `--chat-check` (the full live-web-data turn:
 model → `FETCH:` → context.dev → answer), `--context-check` (`DEBBY_FETCH=<url|query>`),
 `--eleven-check`, `--codex-check`, `--gemini-check`.
+
+Mac measured and renders the HUD offscreen to eyeball it — plus `out.png.rail.png`,
+the agent rail with every card state at once.
+
+`--agent "task" ["task" …]` starts the app with those agents already running, which is
+how you exercise the rail (several at once, hover, Confirm) without talking to it:
+
+```bash
+open build/HeyDebby.app --args --agent "count the files in my Downloads" "summarise my Desktop"
+```
+
