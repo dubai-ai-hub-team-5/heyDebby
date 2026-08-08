@@ -473,7 +473,7 @@ struct NotchView: View {
             .padding(.trailing, 10)
             Color.clear.frame(width: notch.width)
             HStack(spacing: 6) {
-                if state.isThinking || state.agentBusy {
+                if state.isThinking {
                     ProgressView().controlSize(.mini).tint(.white)
                 } else if state.isListening {
                     Waveform(levels: state.levels.suffix(10).map { $0 }, height: 12, barWidth: 2)
@@ -512,12 +512,6 @@ struct NotchView: View {
                             .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if !state.agentLine.isEmpty {
-                        Text(state.agentLine)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.green)
-                            .lineLimit(1)
-                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -528,28 +522,10 @@ struct NotchView: View {
             .frame(height: 64)
 
             HStack(spacing: 14) {
-                if state.pendingNeed != nil && !state.agentBusy {
-                    // The agent stopped before something irreversible and is waiting —
-                    // "I did it" means something else here, so this gets its own labels.
-                    // !agentBusy matches the sibling branch below: don't offer Confirm
-                    // until the run is actually done, not just until it printed the line.
-                    Button { state.confirmNeed() } label: {
-                        Label("Confirm", systemImage: "checkmark.circle.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .tint(.orange)
-                    .help("Let the agent proceed with what it asked")
-                    Button { state.cancelNeed() } label: {
-                        Label("Cancel", systemImage: "xmark.circle.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .tint(.red)
-                    .help("Abandon the agent's paused session — the browser stays open")
-                } else if state.showNext && !state.isThinking && !state.isListening {
+                // Confirm/Cancel for a paused agent used to live here. They are on the
+                // agent's own card now: one notch cannot hold two questions, and the run
+                // that a Confirm resumed was whichever one happened to be in the slot.
+                if state.showNext && !state.isThinking && !state.isListening {
                     Button { state.submit("Done — what's the next step?") } label: {
                         Label("I did it", systemImage: "checkmark.circle.fill")
                             .font(.system(size: 11, weight: .semibold))
@@ -584,7 +560,6 @@ struct NotchView: View {
         if state.isThinking { return "Looking at your screen…" }
         if state.isSpeaking { return "" }  // text shown as a pill beside the cursor while speaking
         if !state.reply.isEmpty { return state.reply }
-        if state.agentBusy { return "Agent working…" }
         return "Hold ⌃⌥ to talk"
     }
 
@@ -854,15 +829,19 @@ struct ProfileSection: View {
             .frame(width: 260)
             HStack(spacing: 8) {
                 Button("Scan now") { state.scanDocuments() }
-                    .controlSize(.small).disabled(state.agentBusy)
-                if state.agentBusy { ProgressView().controlSize(.mini) }
+                    .controlSize(.small).disabled(state.choreBusy)
+                if state.choreBusy { ProgressView().controlSize(.mini) }
                 Spacer(minLength: 4)
-                Button("Delete profile") { Profile.delete() }
+                Button("Delete profile") { state.deleteProfile() }
                     .controlSize(.small)
             }
             .frame(width: 260)
-            Text("Last scanned \(lastScannedLabel)")
+            // The scan's ticker used to run in the notch. The notch is talk-only now, and
+            // this is the window the user pressed the button in anyway.
+            Text(state.choreLine.isEmpty ? "Last scanned \(lastScannedLabel)" : state.choreLine)
                 .font(.caption).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+                .frame(width: 260, alignment: .leading)
             Text("Saved to Application Support, readable only by you. It holds real "
                  + "ID numbers — delete it any time.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -891,6 +870,7 @@ struct SettingsView: View {
     @AppStorage("openaiApiKey") private var openaiApiKey = ""
     @AppStorage("openaiModel") private var openaiModel = ""
     @AppStorage("voiceReplies") private var voiceReplies = true
+    @AppStorage("voiceSource") private var voiceSource = ""
     @AppStorage("voiceId") private var voiceId = ""
     @AppStorage("voiceEngine") private var voiceEngine = "eleven"
     @AppStorage("elevenApiKey") private var elevenApiKey = ""
@@ -963,15 +943,31 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Toggle("Agents: full access (skips sandbox/permissions — risky)", isOn: $agentFullAccess)
-            Toggle("Let Debby control apps (volume, Spotify, menus)", isOn: $appControl)
-            Text("Debby runs short AppleScript commands. macOS asks permission the first "
-                 + "time she talks to a named app, in Privacy & Security → Automation — "
-                 + "some commands, like volume, don't go through that gate at all.")
-                .font(.caption).foregroundStyle(.secondary)
+            // The toggle is not just a safety dial, it is the on switch for agents doing
+            // work at all: without it they can read and use your connected apps, but not
+            // write a file. Saying so here is the difference between a user thinking
+            // agents are broken and a user knowing what to turn on.
+            if agentFullAccess {
+                HStack(spacing: 6) {
+                    Text("Agents leave finished work in ~/Debby.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Open") {
+                        Workspace.ensure()
+                        NSWorkspace.shared.open(Workspace.url)
+                    }
+                    .buttonStyle(.link).controlSize(.small)
+                }
                 .frame(width: 260, alignment: .leading)
-            Text("Once you allow an app, Debby can control it fully, not just the one thing "
-                 + "you asked for. She also decides what to run from what's on your screen, "
-                 + "so a web page or email can influence it. Leave this off unless you want that.")
+            } else {
+                Text("Off, agents can read your files and use your connected apps but "
+                     + "cannot create or change anything. On, they can run commands, so "
+                     + "the job is whatever a command can do — and so is anything else.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
+            }
+            Toggle("Let Debby control volume and media", isOn: $appControl)
+            Text("Debby can change volume and control play/pause, next, or previous in "
+                 + "Music and Spotify. These are fixed actions, not generated scripts.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(width: 260, alignment: .leading)
             Toggle("Let Debby fill forms in a real browser (Playwright)", isOn: Binding(
@@ -983,9 +979,9 @@ struct SettingsView: View {
             ))
             .disabled(!Claude.CLI.isLoggedIn)
             if Claude.CLI.isLoggedIn {
-                Text("Debby fills forms in a real browser and stops for your OK before "
-                     + "anything is submitted. Registers a browser tool with the claude "
-                     + "CLI, so your other claude sessions can see it too.")
+                Text("Debby fills safe fields automatically. Passwords, payments and final "
+                     + "submissions stay in the visible browser for you. HeyDebby grants the "
+                     + "tool only while this is on; user-scoped Claude sessions can also see its registration.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)
             } else {
@@ -1190,13 +1186,29 @@ struct ContainerOutlineView: View {
 // MARK: - Debby pointer (companion cursor, always on screen)
 
 @MainActor
-final class DebbyPointer {
+final class DebbyPointer: ObservableObject {
+    /// Triangle heading in degrees. `restAngle` is the resting arrow; during a flight it
+    /// tracks the tangent of the arc so the cursor faces where it's going.
+    @Published private(set) var rotation: CGFloat = DebbyPointer.restAngle
+    /// Swells toward the apex of a flight and settles back to 1 on landing.
+    @Published private(set) var scale: CGFloat = 1
+
+    static let restAngle: CGFloat = -45
+
     private weak var state: AppState?
     private var window: NSWindow?
     private var timer: Timer?
     private var pos = CGPoint.zero
     private var highlightTarget: CGPoint?
     private var tourTask: Task<Void, Never>?
+
+    // Bezier flight, driven by the same 60fps tick as the follow-the-mouse damping.
+    // `flightTotal == 0` means "not flying" — the follow path owns the cursor.
+    private var flightFrame = 0
+    private var flightTotal = 0
+    private var flightStart = CGPoint.zero
+    private var flightControl = CGPoint.zero
+    private var flightEnd = CGPoint.zero
 
     // Window is wide enough to hold the triangle + a speech pill to its right.
     private let windowSize = CGSize(width: 400, height: 60)
@@ -1213,13 +1225,18 @@ final class DebbyPointer {
         self.state = state
         let w = NSWindow(contentRect: NSRect(origin: NSEvent.mouseLocation, size: windowSize),
                          styleMask: .borderless, backing: .buffered, defer: false)
-        w.level = .statusBar
+        // .screenSaver, not .statusBar: an open NSMenu sits at level 101 and .statusBar is
+        // 25, so pointing at a menu — the single most common thing Debby is asked to do —
+        // put the cursor *behind* the menu the moment the user opened it.
+        w.level = .screenSaver
         w.backgroundColor = .clear
         w.isOpaque = false
         w.ignoresMouseEvents = true
         w.hasShadow = false
-        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        w.contentView = NSHostingView(rootView: DebbyPointerView().environmentObject(state))
+        w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        w.contentView = NSHostingView(rootView: DebbyPointerView()
+            .environmentObject(state)
+            .environmentObject(self))
         w.orderFrontRegardless()
         window = w
         pos = NSEvent.mouseLocation
@@ -1231,7 +1248,8 @@ final class DebbyPointer {
     private func tick() {
         guard let w = window else { return }
         let mouse = NSEvent.mouseLocation
-        state?.trackMouse(mouse)
+        state?.trackMouse(mouse)   // drives notch hover — must run every frame, flying or not
+        if flightTotal > 0 { advanceFlight(w); return }
         let tipTarget = highlightTarget ?? CGPoint(x: mouse.x + 18, y: mouse.y - 18)
         let desired = CGPoint(x: tipTarget.x - tip.x, y: tipTarget.y - tip.y)
         if abs(desired.x - pos.x) < 0.3 && abs(desired.y - pos.y) < 0.3 { return }
@@ -1240,22 +1258,72 @@ final class DebbyPointer {
         w.setFrameOrigin(pos)
     }
 
+    /// Flies the cursor to each point in turn, dwelling on one long enough to read its
+    /// label before moving on. 2.4s: three points still land inside the overlay's 8s
+    /// auto-hide, so a tour can't outlive the marks it is touring.
     func highlight(_ points: [CGPoint]) {
         tourTask?.cancel()
         guard !points.isEmpty else { return }
         tourTask = Task { [weak self] in
             for (i, p) in points.enumerated() {
                 guard !Task.isCancelled else { return }
-                self?.highlightTarget = p
-                if i < points.count - 1 { try? await Task.sleep(nanoseconds: 1_400_000_000) }
+                self?.flyTo(p)
+                if i < points.count - 1 { try? await Task.sleep(nanoseconds: 2_400_000_000) }
             }
         }
+    }
+
+    /// Starts a bezier arc toward `target`. A short hop is left to the damping in `tick`:
+    /// an arc and a swoop across 20 points reads as a glitch, not as motion.
+    private func flyTo(_ target: CGPoint) {
+        highlightTarget = target
+        let end = CGPoint(x: target.x - tip.x, y: target.y - tip.y)
+        let distance = hypot(end.x - pos.x, end.y - pos.y)
+        guard distance > 24 else { flightTotal = 0; return }
+        flightStart = pos
+        flightEnd = end
+        // Bulge the control point up-screen (+y in AppKit) so the cursor lobs rather than
+        // slides. Capped so a cross-screen flight doesn't arc off the top.
+        let arc = min(distance * 0.2, 80)
+        flightControl = CGPoint(x: (flightStart.x + end.x) / 2,
+                                y: (flightStart.y + end.y) / 2 + arc)
+        flightFrame = 0
+        flightTotal = Int(min(max(distance / 800, 0.6), 1.4) * 60)
+    }
+
+    private func advanceFlight(_ w: NSWindow) {
+        flightFrame += 1
+        guard flightFrame <= flightTotal else {
+            flightTotal = 0
+            pos = flightEnd
+            rotation = Self.restAngle
+            scale = 1
+            w.setFrameOrigin(pos)
+            return
+        }
+        let linear = CGFloat(flightFrame) / CGFloat(flightTotal)
+        let t = linear * linear * (3 - 2 * linear)   // smoothstep ease-in-out
+        let u = 1 - t
+        // Quadratic bezier B(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
+        pos = CGPoint(x: u * u * flightStart.x + 2 * u * t * flightControl.x + t * t * flightEnd.x,
+                      y: u * u * flightStart.y + 2 * u * t * flightControl.y + t * t * flightEnd.y)
+        // Face the direction of travel: the curve's tangent B'(t). AppKit is y-up and the
+        // view is y-down, so the y component flips before it becomes a screen angle.
+        let tanX = 2 * u * (flightControl.x - flightStart.x) + 2 * t * (flightEnd.x - flightControl.x)
+        let tanY = 2 * u * (flightControl.y - flightStart.y) + 2 * t * (flightEnd.y - flightControl.y)
+        // +90 because the triangle's apex points up at 0°, while atan2 calls 0° rightward.
+        rotation = atan2(-tanY, tanX) * 180 / .pi + 90
+        scale = 1 + sin(linear * .pi) * 0.3
+        w.setFrameOrigin(pos)
     }
 
     func endHighlight() {
         tourTask?.cancel()
         tourTask = nil
         highlightTarget = nil
+        flightTotal = 0
+        rotation = Self.restAngle
+        scale = 1
     }
 }
 
@@ -1272,6 +1340,7 @@ struct TriangleShape: Shape {
 
 struct DebbyPointerView: View {
     @EnvironmentObject var state: AppState
+    @EnvironmentObject var pointer: DebbyPointer
 
     var body: some View {
         // Hidden entirely during drawing so the system crosshair is unobstructed.
@@ -1286,7 +1355,8 @@ struct DebbyPointerView: View {
                             .fill(Color.orange)
                             .overlay(TriangleShape().stroke(.white.opacity(0.9), lineWidth: 1))
                             .frame(width: 18, height: 18)
-                            .rotationEffect(.degrees(-45))
+                            .rotationEffect(.degrees(pointer.rotation))
+                            .scaleEffect(pointer.scale)
                             .shadow(color: .orange.opacity(0.9), radius: 3)
                             .shadow(color: .orange.opacity(0.45), radius: 7)
                     }
@@ -1384,12 +1454,14 @@ final class OverlayController: ObservableObject {
 
     private func openWindow(on screen: NSScreen) {
         let w = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
-        w.level = .statusBar
+        // Same reason as DebbyPointer: the ring that marks a menu item has to survive the
+        // user opening that menu, and NSMenu outranks .statusBar.
+        w.level = .screenSaver
         w.backgroundColor = .clear
         w.isOpaque = false
         w.ignoresMouseEvents = true
         w.hasShadow = false
-        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         w.contentView = NSHostingView(rootView: OverlayView(controller: self, size: screen.frame.size))
         w.orderFrontRegardless()
         window = w

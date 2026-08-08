@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Speech
 
 /// Loudness of one mic buffer, for the cursor visualiser.

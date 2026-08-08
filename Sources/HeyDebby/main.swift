@@ -87,94 +87,33 @@ func runSelfCheck() {
     assert(splitWhole("This is **really** important.") == [.say("This is really important.")],
            "bold must be stripped from spoken prose: \(splitWhole("This is **really** important."))")
 
-    // --- RUN: app control ---
-    let vol = splitWhole("Turning it up.\nRUN: set volume output volume 60\nDone.")
-    assert(vol.count == 3, "RUN must be its own beat: \(vol)")
-    assert(vol[0] == .say("Turning it up.") && vol[2] == .say("Done."),
-           "a RUN line must not be spoken: \(vol)")
-    assert(vol[1] == .run("set volume output volume 60"), "RUN payload wrong: \(vol[1])")
+    // --- ACTION: closed app-control protocol ---
+    let vol = splitWhole("Turning it up.\nACTION: {\"type\":\"set_volume\",\"value\":60}\nDone.")
+    assert(vol == [.say("Turning it up."), .action(.setVolume(60)), .say("Done.")],
+           "a typed action must keep its place without becoming speech: \(vol)")
+    assert(splitWhole("ACTION: {\"type\":\"change_volume\",\"value\":-10}")
+           == [.action(.changeVolume(-10))], "bounded relative volume must parse")
+    assert(splitWhole("ACTION: {\"type\":\"media\",\"app\":\"spotify\",\"command\":\"play_pause\"}")
+           == [.action(.media(app: .spotify, command: .playPause))], "Spotify transport must parse")
+    assert(splitWhole("ACTION: {\"type\":\"media\",\"app\":\"music\",\"command\":\"next\"}")
+           == [.action(.media(app: .music, command: .next))], "Music transport must parse")
 
-    // The payload is handed to osascript verbatim — quoting and punctuation must survive.
-    let track = splitWhole("RUN: tell application \"Spotify\" to play track \"spotify:track:1\"")
-    assert(track == [.run("tell application \"Spotify\" to play track \"spotify:track:1\"")],
-           "quotes and colons inside a RUN payload must survive: \(track)")
-
-    // AppleScript can shell out. The payload is model-written and the model reads the
-    // user's screen, so a page saying this is a live injection path — drop it at the parser.
-    assert(splitWhole("RUN: do shell script \"rm -rf ~\"") == [],
-           "do shell script must never become a beat")
-    assert(splitWhole("RUN: DO SHELL SCRIPT \"rm -rf ~\"") == [],
-           "the shell-out check is case-insensitive")
-    assert(splitWhole("RUN: tell app \"Terminal\" to do script \"rm -rf ~\"") == [],
-           "do script opens a Terminal window running a command — same hole")
-
-    // Ordering: a RUN between two sentences plays between them, not at the end.
-    let order = splitWhole("First.\nRUN: beep\nSecond.\nRUN: beep 2\nThird.")
-    assert(order.count == 5 && order[1] == .run("beep") && order[3] == .run("beep 2"),
-           "RUN beats must keep their position in the narration: \(order)")
-
-    // AppleScript ignores whitespace between tokens; the check must too.
-    assert(splitWhole("RUN: do  shell   script \"id\"") == [],
-           "extra spaces must not slip past the rail")
-    assert(splitWhole("RUN: do\tshell\tscript \"id\"") == [],
-           "tabs must not slip past the rail")
-    // The eval primitives, which can build the other forbidden phrases at runtime.
-    assert(splitWhole("RUN: run script (\"do sh\" & \"ell script \\\"id\\\"\")") == [],
-           "run script is eval — it defeats any lexical check downstream of it")
-    assert(splitWhole("RUN: load script file \"/tmp/x.scpt\"") == [],
-           "load script + run is the same hole in two steps")
-    // Telling a terminal is shell access wearing a hat.
-    assert(splitWhole("RUN: tell application \"Terminal\" to activate") == [],
-           "no talking to terminal emulators")
-    // The things we actually want must still work.
-    assert(splitWhole("RUN: set volume output volume 60")
-           == [.run("set volume output volume 60")], "volume must still work")
-    assert(splitWhole("RUN: tell application \"Spotify\" to playpause")
-           == [.run("tell application \"Spotify\" to playpause")], "Spotify must still work")
-    assert(splitWhole("RUN: tell application \"System Events\" to keystroke \"n\" using command down")
-           == [.run("tell application \"System Events\" to keystroke \"n\" using command down")],
-           "System Events must still work — it is how non-scriptable apps are reached")
-
-    // Known and accepted: GUI scripting is allowed, so RUN: is not a boundary against a
-    // determined injection. This asserts the limit deliberately — if it ever starts
-    // failing, someone tightened the rail and the settings copy needs to change with it.
-    // Asserting the exact beat (not just a count of 1) matters: deleting the whole RUN:
-    // branch also yields exactly one beat — a .say of the fallen-through prose line —
-    // so a bare `.count == 1` would stay green even with the branch gone.
-    let keystroke = splitWhole("RUN: tell application \"System Events\" to keystroke \"t\" using command down")
-    assert(keystroke == [.run("tell application \"System Events\" to keystroke \"t\" using command down")],
-           "keystroke injection is knowingly allowed; see shellsOut's comment")
-
-    // The bypasses that are NOT accepted.
-    assert(splitWhole("RUN: tell application id \"com.apple.Terminal\" to activate") == [],
-           "a terminal named by bundle id must still be refused")
-    assert(splitWhole("RUN: tell application \"Terminal.app\" to activate") == [],
-           "a terminal named with a .app suffix must still be refused")
-
-    // Raw four-char event codes contain none of the denylisted keywords and reach the
-    // same places `do shell script` does — demonstrated live with
-    // `osascript -e '«event sysoexec» "id -un"'`. Any use of the raw-code syntax is refused.
-    assert(splitWhole("RUN: «event sysoexec» \"touch /tmp/pwned; id -un\"") == [],
-           "raw four-char event codes must be refused — they carry no denylisted keyword")
-    assert(splitWhole("RUN: tell application id \"«event sysoexec»\" to activate") == [],
-           "a guillemet anywhere in the payload is refused, not just at the start")
-    // An ordinary payload with neither guillemet must be unaffected by the new check.
-    assert(splitWhole("RUN: tell application \"Spotify\" to playpause")
-           == [.run("tell application \"Spotify\" to playpause")],
-           "a payload containing neither guillemet must still pass")
-
-    // `display dialog` is a zero-permission, native-looking prompt that can carry a masked
-    // "hidden answer" field — a credential-phishing primitive reachable from on-screen text,
-    // not a shell-out, but refused for the same reason: it must never become a beat.
-    assert(splitWhole("RUN: display dialog \"macOS needs your password to continue\" with hidden answer") == [],
-           "display dialog must be refused — it's a masked-input credential prompt")
-    assert(splitWhole("RUN: display dialog \"Enter your name\" default answer \"\"") == [],
-           "display dialog is refused wholesale, even without hidden answer")
-    // A nearby, legitimate payload that must still pass: display notification carries no
-    // text field at all, so it isn't the phishing shape and shouldn't be caught in the net.
-    assert(splitWhole("RUN: display notification \"Volume set to 60%\"")
-           == [.run("display notification \"Volume set to 60%\"")],
-           "display notification has no text field and must still work")
+    assert(splitWhole("ACTION: {\"type\":\"set_volume\",\"value\":-1}") == [],
+           "absolute volume below zero must be rejected")
+    assert(splitWhole("ACTION: {\"type\":\"set_volume\",\"value\":101}") == [],
+           "absolute volume above 100 must be rejected")
+    assert(splitWhole("ACTION: {\"type\":\"change_volume\",\"value\":-21}") == [],
+           "relative volume below -20 must be rejected")
+    assert(splitWhole("ACTION: {\"type\":\"change_volume\",\"value\":21}") == [],
+           "relative volume above 20 must be rejected")
+    assert(splitWhole("ACTION: {\"type\":\"media\",\"app\":\"Terminal\",\"command\":\"play_pause\"}") == [],
+           "unknown applications must be rejected")
+    assert(splitWhole("ACTION: {\"type\":\"media\",\"app\":\"spotify\",\"command\":\"delete\"}") == [],
+           "unknown commands must be rejected")
+    assert(splitWhole("ACTION: {\"type\":\"set_volume\",\"value\":60,\"script\":\"do shell script 'id'\"}") == [],
+           "extra properties must not smuggle executable text")
+    assert(splitWhole("RUN: do shell script \"id\"") == [],
+           "the removed raw protocol must be ignored, not spoken or executed")
 
     // --- CRLF: a PTY-wrapped subprocess writes \r\n, not \n ---
     // The whole lesson, replayed with CRLF line endings in one chunk, must produce the
@@ -185,9 +124,9 @@ func runSelfCheck() {
     let crlfLesson = lesson.replacingOccurrences(of: "\n", with: "\r\n")
     assert(splitWhole(crlfLesson) == lb,
            "CRLF line endings must not change the beats: \(splitWhole(crlfLesson))")
-    // The marker path specifically, not just prose: a CRLF-terminated RUN: line.
-    let crlfRun = splitWhole("Turning it up.\r\nRUN: set volume output volume 60\r\nDone.")
-    assert(crlfRun == vol, "a CRLF-terminated RUN line must parse the same as an LF one: \(crlfRun)")
+    // The marker path specifically, not just prose: a CRLF-terminated ACTION: line.
+    let crlfAction = splitWhole("Turning it up.\r\nACTION: {\"type\":\"set_volume\",\"value\":60}\r\nDone.")
+    assert(crlfAction == vol, "a CRLF-terminated action must parse the same as LF: \(crlfAction)")
     // CRLF-separated prose must still split into two sentences, not one glued blob.
     let crlfProse = splitWhole("First sentence.\r\nSecond sentence.\r\n")
     assert(crlfProse == [.say("First sentence."), .say("Second sentence.")],
@@ -244,14 +183,14 @@ func runSelfCheck() {
     // green while reopening the exact hole AgentRunner.spawn's zsh -lc path has.
     assert(Control.executablePath == "/usr/bin/osascript",
            "statements must run through osascript, never a shell")
-    assert(Control.arguments(for: ["set volume output volume 60"])
-           == ["-e", "set volume output volume 60"], "one statement, one -e pair")
-    assert(Control.arguments(for: ["a", "b"]) == ["-e", "a", "-e", "b"],
-           "statements run in order, each its own -e")
-    // The whole point of an arguments array: shell metacharacters are inert data.
-    let nasty = "tell app \"X\" to y'; rm -rf ~; echo '"
-    assert(Control.arguments(for: [nasty]) == ["-e", nasty],
-           "a payload with shell metacharacters must arrive verbatim, unquoted and unsplit")
+    assert(Control.arguments(for: .setVolume(60))
+           == ["-e", "set volume output volume 60"], "volume uses a fixed numeric template")
+    assert(Control.arguments(for: .media(app: .spotify, command: .playPause))
+           == ["-e", "tell application \"Spotify\" to playpause"],
+           "Spotify action uses a fixed application and command")
+    let relative = Control.arguments(for: .changeVolume(-10)).joined(separator: " ")
+    assert(relative.contains("output volume") && relative.contains("-10")
+           && !relative.contains("do shell script"), "relative volume must clamp in fixed AppleScript")
 
     let r1 = parseReply("Click the File menu.\nPOINT: {\"x\":0.1,\"y\":0.2,\"label\":\"File\"}")
     assert(r1.text == "Click the File menu.", "clean text wrong: \(r1.text)")
@@ -364,17 +303,24 @@ func runSelfCheck() {
     assert(played3 == ["say:a", "draw:line", "say:b"],
            "voiceReplies off must not stall the queue: \(played3)")
 
-    // A .run beat fires in order and does not block what follows, unlike .say.
+    // An action beat fires in order and does not block what follows, unlike .say.
     let lp6 = LessonPlayer()
     var played6: [String] = []
     lp6.onSay = { played6.append("say:\($0)") }
-    lp6.onRun = { played6.append("run:\($0)") }
-    lp6.append([.run("beep"), .say("hello"), .run("beep 2")])
-    assert(played6 == ["run:beep", "say:hello"],
-           "a run before a sentence fires immediately; the one after it waits: \(played6)")
+    lp6.onAction = { action in
+        switch action {
+        case .setVolume(let value): played6.append("volume:\(value)")
+        case .changeVolume(let value): played6.append("delta:\(value)")
+        case .media(let app, let command): played6.append("media:\(app):\(command)")
+        }
+    }
+    lp6.append([.action(.setVolume(10)), .say("hello"),
+                .action(.media(app: .music, command: .next))])
+    assert(played6 == ["volume:10", "say:hello"],
+           "an action before a sentence fires immediately; the one after it waits: \(played6)")
     lp6.speechFinished()
-    assert(played6 == ["run:beep", "say:hello", "run:beep 2"],
-           "the trailing run fires once the sentence ends: \(played6)")
+    assert(played6 == ["volume:10", "say:hello", "media:music:next"],
+           "the trailing action fires once the sentence ends: \(played6)")
 
     // A right triangle can't come from a bounding box — 3 points must reach the path as given.
     let tri = DrawnShape(tool: .triangle,
@@ -423,19 +369,16 @@ func runSelfCheck() {
     // Without an allowlist `claude -p` denies every tool, so app tasks fail silently.
     // The prompt must come before --allowedTools, which is variadic and eats what follows.
     let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false, appControl: true)
-    assert(cl.hasSuffix("--allowedTools mcp__composio mcp__playwright Read Glob Grep Bash(osascript:*)"),
+    assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep"),
            "claude agent needs tools: \(cl)")
     assert(cl.range(of: "'email bob'")!.upperBound <= cl.range(of: "--allowedTools")!.lowerBound,
            "prompt must precede the variadic flag: \(cl)")
 
-    // Agents get scoped shell for AppleScript — not bare Bash — and ONLY when the user has
-    // switched app control on. An agent's osascript call runs raw, never through
-    // BeatSplitter's refusal list, so this grant must not be a second, ungated door into
-    // the same capability the RUN: rail exists to gate.
+    // Background agents never receive raw osascript; local actions flow only through the
+    // typed AppAction parser and fixed Control templates.
     let ag = agentCommand(backend: "claude", task: "play some music",
                           screenshotPath: nil, fullAccess: false, appControl: true)
-    assert(ag.contains("Bash(osascript:*)"),
-           "app control on: the claude agent needs scoped osascript for app tasks: \(ag)")
+    assert(!ag.contains("osascript"), "app control must not open a second raw-code path: \(ag)")
     assert(ag.range(of: "'play some music'")!.upperBound
            <= ag.range(of: "--allowedTools")!.lowerBound,
            "--allowedTools is variadic and must stay last")
@@ -446,6 +389,111 @@ func runSelfCheck() {
     // Full access already implies everything; the scoped entry would be noise.
     assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false, appControl: true)
             .contains("osascript"), "codex agents are unaffected")
+
+    // --- private process logging: callers receive output, disk does not ---
+    let privateRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("heydebby-log-selfcheck-\(UUID().uuidString)", isDirectory: true)
+    let privateLog = privateRoot.appendingPathComponent("debby.log")
+    let privateSink = LogSink(url: privateLog)
+    let privateDone = DispatchSemaphore(value: 0)
+    let privateOutput = OutputBox()
+    _ = AgentRunner.spawn("printf 'PRIVATE-SENTINEL'", logging: .privateOutput(label: "profile scan"),
+                          logSink: privateSink,
+                          onOutput: { privateOutput.append($0) },
+                          onDone: { _ in privateDone.signal() })
+    assert(privateDone.wait(timeout: .now() + 5) == .success,
+           "private-output process did not finish")
+    assert(privateOutput.text == "PRIVATE-SENTINEL", "private output must still reach its caller")
+    let privateDisk = (try? String(contentsOf: privateLog, encoding: .utf8)) ?? ""
+    assert(privateDisk.contains("RUN profile scan") && privateDisk.contains("EXIT profile scan 0"),
+           "private log must retain generic lifecycle metadata: \(privateDisk)")
+    assert(!privateDisk.contains("PRIVATE-SENTINEL") && !privateDisk.contains("printf"),
+           "private log must contain neither command nor child output: \(privateDisk)")
+    let privateDirMode = ((try? FileManager.default.attributesOfItem(atPath: privateRoot.path)[.posixPermissions]) as? NSNumber)?.intValue
+    let privateFileMode = ((try? FileManager.default.attributesOfItem(atPath: privateLog.path)[.posixPermissions]) as? NSNumber)?.intValue
+    assert(privateDirMode == 0o700 && privateFileMode == 0o600,
+           "log directory/file permissions must be 0700/0600, got \(String(describing: privateDirMode))/\(String(describing: privateFileMode))")
+    try? FileManager.default.removeItem(at: privateRoot)
+
+    // --- the read-only grant is pinned, not inherited ---
+    // --allowedTools ADDS to the user's ~/.claude/settings.json rather than replacing it,
+    // so a `permissions.defaultMode` of auto/acceptEdits/bypassPermissions there hands
+    // every "read-only" agent Write and Bash. Observed, not theorised: on a machine with
+    // `auto` set, an agent carrying exactly this allowlist wrote the file it was asked
+    // for. The pin is what makes the README's "read-mostly by default" true off this Mac.
+    let pinned = agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: false)
+    assert(pinned.contains("--permission-mode manual"),
+           "a non-full-access agent must pin its own posture: \(pinned)")
+    assert(pinned.range(of: "--permission-mode")!.upperBound <= pinned.range(of: "'hi'")!.lowerBound,
+           "flags come before the prompt; --allowedTools is the only thing after it")
+    // Passing both would be contradictory, and the CLI is entitled to reject the pair.
+    assert(!agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: true)
+            .contains("--permission-mode"), "full access is already explicit — no second mode flag")
+    // codex names its sandbox on the command line either way, so it has nothing to inherit.
+    assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false)
+            .contains("--permission-mode"), "codex takes no claude flags")
+
+    // --- doing the job: which capability note the agent is told ---
+    // Exactly one of the two, never both: they contradict each other outright, and an
+    // agent told both "you can create files" and "you cannot change anything" resolves it
+    // by guessing.
+    let jobPrompt = agentPrompt(task: "make me a spreadsheet of my expenses",
+                                fullAccess: true, browser: false)
+    assert(jobPrompt.contains(Workspace.path), "a working agent must be told where output goes")
+    assert(jobPrompt.contains("openpyxl"), "spreadsheets are files, and the note must say how")
+    assert(!jobPrompt.contains("full access"), "already on; nothing to ask the user to switch on")
+    let roPrompt = agentPrompt(task: "make me a spreadsheet of my expenses",
+                               fullAccess: false, browser: false)
+    assert(roPrompt.contains("Agents: full access"),
+           "a blocked agent must name the setting, or the run reports success over nothing")
+    assert(!roPrompt.contains(Workspace.path) && !roPrompt.contains("openpyxl"),
+           "an agent that cannot write must not be told where to write: \(roPrompt)")
+    // Both carry Composio: connected apps work in either mode, since a remote app write
+    // is not a local one. Browser stays independent of the pair.
+    assert(jobPrompt.contains("COMPOSIO_SEARCH_TOOLS") && roPrompt.contains("COMPOSIO_SEARCH_TOOLS"),
+           "connected apps are not gated on full access")
+    let browserPrompt = agentPrompt(task: "book a slot", fullAccess: false, browser: true,
+                                    profileURL: URL(fileURLWithPath: "/tmp/profile.json"))
+    assert(browserPrompt.contains("/tmp/profile.json"),
+           "browser control must include the validated profile path")
+    assert(!browserPrompt.contains("NEED:"),
+           "browser-policy denials are a user handoff, never a resumable agent gate")
+    assert(browserPrompt.contains("Do not ask to resume"),
+           "a denied browser action must stop instead of creating an unsafe retry path")
+    let fullBrowserPrompt = agentPrompt(task: "book a slot", fullAccess: true, browser: true)
+    assert(fullBrowserPrompt.contains("cannot run arbitrary commands")
+           && !fullBrowserPrompt.contains(Workspace.path)
+           && !fullBrowserPrompt.contains("Agents: full access"),
+           "browser policy narrows even a full-access run, so its prompt must not promise a shell")
+    // The grant is command execution, so the note must read as a general capability. This
+    // is a real regression this code already had once: the first draft explained how to
+    // build a spreadsheet and nothing else, which does not describe a shell — it teaches
+    // the agent that spreadsheets are the job Debby does. The formats below are examples,
+    // and the test exists to keep them examples.
+    assert(jobPrompt.contains("any command"),
+           "the capability is the shell, not a task list: \(workNote)")
+    assert(jobPrompt.contains("no fixed list"),
+           "an agent must not infer the supported tasks from the ones named here")
+    for pkg in ["openpyxl", "python-pptx", "python-docx", "pypdf", "pandas", "pillow"] {
+        assert(workNote.contains(pkg),
+               "\(pkg) missing — spreadsheets must read as one example among many, not the feature")
+    }
+    // Writing a script and running it is the general shape of "do a job with a command",
+    // and leaving it behind turns a one-off run into something the user can run again.
+    assert(workNote.contains("Python script") && workNote.contains("re-run"),
+           "the route to any format is a script the user keeps, not a built-in per app")
+    // One mechanism for every tool, so a task needing something unusual is not a dead end.
+    // Per-run rather than installed: an agent that `brew install`s on someone's Mac to
+    // finish a five-minute job leaves the machine changed in a way nobody asked for.
+    assert(workNote.contains("uv run --with") && workNote.contains("uvx"),
+           "the note must say how to get ANY library or CLI tool, not assume one is present")
+    // The file route, not the app route: AppleScript against Excel needs an Automation
+    // grant the agent path never asks for, breaks with the app closed, and can clobber
+    // unsaved edits in an open workbook. Driving apps is the interactive RUN: rail's job.
+    assert(!workNote.lowercased().contains("applescript") || workNote.contains("Do NOT remote-control"),
+           "documents are built by writing files, never by driving the app: \(workNote)")
+    // An unattended agent has no user watching the notch to catch an empty result.
+    assert(workNote.contains("verify"), "a job reported without checking is a job reported blind")
 
     // --- agent session id / resume ---
     let uuid = "0F8E4B10-3C2A-4D5E-9F01-2A3B4C5D6E7F"
@@ -488,48 +536,100 @@ func runSelfCheck() {
     assert(gateFull.contains("-r \(shellQuote(uuid))"), "full access still resumes the same session: \(gateFull)")
     assert(!gateFull.contains("--session-id"), "resume must not also pin a fresh session: \(gateFull)")
 
-    // --- browser control: the Playwright gateway + browserNote ---
-    // Browser tasks need the playwright gateway; the allowlist stays last.
+    // --- browser control: capability and policy are both per run ---
+    let noBrowser = agentCommand(backend: "claude", task: "book a slot", screenshotPath: nil,
+                                 fullAccess: false, session: "S1")
+    assert(!noBrowser.contains("mcp__playwright") && !noBrowser.contains("--settings"),
+           "browser off must remove both the tool and its policy settings: \(noBrowser)")
     let br = agentCommand(backend: "claude", task: "book a slot", screenshotPath: nil,
-                          fullAccess: false, session: "S1")
+                          fullAccess: false, session: "S1", browser: true,
+                          settingsPath: "/tmp/hey debby policy.json")
     assert(br.contains("mcp__playwright"), "the browser gateway must be allowed: \(br)")
+    assert(br.contains("--settings '/tmp/hey debby policy.json'"),
+           "browser runs must carry their app-scoped policy: \(br)")
     // Do not assert on the last token — the app-control plan appends to this list.
     assert(br.range(of: "--allowedTools")!.lowerBound
            > br.range(of: "'book a slot'")!.lowerBound,
            "--allowedTools is variadic and must stay after the prompt")
-    // The note must forbid the three things Debby must never do, in words the model reads.
-    assert(browserNote.contains("NEED:"), "the note must define the gate marker")
-    assert(browserNote.lowercased().contains("captcha"), "the note must forbid CAPTCHAs")
-    assert(browserNote.contains(Profile.url.path),
+    let browserFull = agentCommand(backend: "claude", task: "book a slot", screenshotPath: nil,
+                                   fullAccess: true, session: "S2", browser: true,
+                                   settingsPath: "/tmp/policy.json")
+    assert(!browserFull.contains("--dangerously-skip-permissions")
+           && browserFull.contains("mcp__playwright"),
+           "full access must not bypass the browser policy: \(browserFull)")
+    let setup = browserSetupCommand(userDataDir: "/tmp/browser profile")
+    assert(setup.contains("@playwright/mcp@0.0.79") && !setup.contains("@latest"),
+           "browser setup must use the reviewed Playwright MCP version: \(setup)")
+    // Browser denial is a terminal handoff, not a question that can resume the action.
+    let validBrowserNote = browserGuidance(profileURL: Profile.url)
+    assert(!validBrowserNote.contains("NEED:"),
+           "browser safety must not offer a resume path for a denied action")
+    assert(validBrowserNote.lowercased().contains("leave the browser open"),
+           "the agent must hand denied work to the visible browser")
+    assert(validBrowserNote.lowercased().contains("captcha"), "the note must forbid CAPTCHAs")
+    assert(validBrowserNote.contains(Profile.url.path),
            "the note carries the profile PATH, never its contents — argv is world-readable")
-    assert(!browserNote.contains("passport") && !browserNote.contains("K1234567"),
+    assert(!validBrowserNote.contains("passport") && !validBrowserNote.contains("K1234567"),
            "the note must never carry an example of an actual profile value")
+    assert(!browserGuidance(profileURL: nil).contains(Profile.url.path),
+           "an invalid or missing profile path must not be offered to the agent")
 
-    // The marker is documented only when the feature is on. A model told about a marker
+    // --- browser policy: the prompt is guidance; this is the executable boundary ---
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_snapshot", input: [:]) == .allow,
+           "reading the visible page must remain automatic")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_navigate",
+                                  input: ["url": "https://example.com/form"]) == .allow,
+           "ordinary HTTPS navigation must remain automatic")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_fill_form", input: [
+        "fields": [["name": "Full name", "type": "textbox", "ref": "e12", "value": "Debby User"]]
+    ]) == .allow, "ordinary non-secret form fields must remain automatic")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_click",
+                                  input: ["element": "Submit application", "ref": "e90"]).isDenied,
+           "final submission must be handed to the user")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_click",
+                                  input: ["element": "Next", "ref": "e91", "futurePower": true]).isDenied,
+           "known tools with unknown arguments must fail closed")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_snapshot",
+                                  input: ["futurePower": true]).isDenied,
+           "observation tools must also reject unknown arguments")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_fill_form", input: [
+        "fields": [["name": "Password", "type": "textbox", "ref": "e13", "value": "secret"]]
+    ]).isDenied, "password fields must never be filled")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_fill_form", input: [
+        "fields": [["name": "Number", "type": "textbox", "ref": "e14", "value": "4111111111111111"]]
+    ]).isDenied, "card numbers must be denied even when the field label is vague")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_evaluate",
+                                  input: ["function": "() => document.cookie"]).isDenied,
+           "arbitrary page JavaScript must never execute")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__future_tool", input: [:]).isDenied,
+           "new Playwright tools must fail closed until reviewed")
+
+    let malformedHook = BrowserPolicy.evaluateHookJSON(Data("not json".utf8))
+    let malformedHookText = String(decoding: malformedHook, as: UTF8.self)
+    assert(malformedHookText.contains("\"permissionDecision\":\"deny\""),
+           "malformed hook input must fail closed")
+    let policySettings = try! BrowserPolicy.settingsJSON(
+        executablePath: "/Applications/Hey Debby.app/Contents/MacOS/HeyDebby")
+    let policySettingsText = String(decoding: policySettings, as: UTF8.self)
+    assert(policySettingsText.contains("PreToolUse") && policySettingsText.contains("mcp__playwright"),
+           "per-run settings must register the browser hook")
+    assert(policySettingsText.contains("--browser-policy-hook") && policySettingsText.contains("Hey Debby.app"),
+           "the hook must invoke the current app executable, including paths with spaces")
+
+    // The typed marker is documented only when the feature is on. A model told about a marker
     // the app will drop announces actions that never happen.
-    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("RUN:"),
+    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("ACTION:"),
            "app control on must document the marker")
-    assert(!Claude.promptTemplate(aspect: 1.6, appControl: false).contains("RUN:"),
+    assert(!Claude.promptTemplate(aspect: 1.6, appControl: false).contains("ACTION:"),
            "app control off must not mention the marker")
-    assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("do shell script"),
-           "the prompt must tell the model the shell escape is refused")
-    // Adjacent RUN: lines are not serialized (each spawns its own osascript process) even
-    // with voice replies off, when .say never blocks the queue either — so the prompt must
-    // not claim a sentence in between guarantees order, only that a single statement does.
+    assert(!Claude.promptTemplate(aspect: 1.6, appControl: true).contains("RUN:"),
+           "the prompt must not document model-authored AppleScript")
     let runOnPrompt = Claude.promptTemplate(aspect: 1.6, appControl: true)
-    assert(runOnPrompt.contains("finish out of order") && runOnPrompt.contains("single statement"),
-           "the prompt must warn RUN lines can race and point at one statement, not a sentence, as the fix")
-    assert(!runOnPrompt.contains("always finishes before the next line runs"),
-           "the ordering claim must not promise something LessonPlayer doesn't deliver when voiceReplies is off")
-    // The prompt's refusal list must name every form the parser actually refuses, or a model
-    // asked for a refused one emits a RUN line that is silently dropped and narrates success.
-    for term in BeatSplitter.refusedForms {
-        assert(runOnPrompt.localizedCaseInsensitiveContains(term),
-               "prompt must document refused form: \(term)")
-    }
+    assert(runOnPrompt.contains("set_volume") && runOnPrompt.contains("play_pause"),
+           "the prompt must enumerate the closed action vocabulary")
     // "You cannot act on apps yourself" (the agent-routing paragraph) would directly
-    // contradict the RUN: section once app control is on — it must not appear together
-    // with RUN:, and RUN:'s absence must not lose the agent-routing guidance either.
+    // contradict the ACTION: section once app control is on — it must not appear together
+    // with ACTION:, and ACTION:'s absence must not lose the agent-routing guidance either.
     assert(!Claude.promptTemplate(aspect: 1.6, appControl: true).contains("cannot act on apps"),
            "app control on must not still claim apps are out of reach")
     assert(Claude.promptTemplate(aspect: 1.6, appControl: true).contains("agent:"),
@@ -660,88 +760,220 @@ func runSelfCheck() {
     assert(crSplit.feed("\n") == nil, "the paired \\n arriving after must not fire a second time")
 
     // --- agentOutcome: the pure decision onDone makes, testable with no scanner/process ---
-    let doneOK = agentOutcome(exitCode: 0, need: nil)
-    assert(doneOK.line == "✅ agent done" && doneOK.fades, "a clean exit with no question fades")
-    let doneErr = agentOutcome(exitCode: 2, need: nil)
-    assert(doneErr.line == "❌ agent exited (2)" && doneErr.fades, "a nonzero exit with no question fades")
-    let gated = agentOutcome(exitCode: 0, need: "q")
-    assert(gated.line == "❓ q" && !gated.fades, "a question must not fade — it waits for Confirm/Cancel")
-    let gatedNonzero = agentOutcome(exitCode: 1, need: "q")
-    assert(gatedNonzero.line == "❓ q" && !gatedNonzero.fades,
+    assert(agentOutcome(exitCode: 0, need: nil) == .done, "a clean exit with no question is done")
+    assert(agentOutcome(exitCode: 2, need: nil) == .failed(2), "a nonzero exit carries its code")
+    assert(agentOutcome(exitCode: 0, need: "q") == .asking("q"),
+           "a paused agent exits 0 — reporting that as done would claim a half-finished job succeeded")
+    assert(agentOutcome(exitCode: 1, need: "q") == .asking("q"),
            "a NEED: seen right before a nonzero exit still shows the question, not the error")
 
-    // A gate nobody can see is a hang: a pending question must keep the notch open, and
-    // Cancel must be able to clear it without ever touching AgentRunner (no CLI spawn
-    // here) — feedGate/finishGate are exercised directly, with synthetic chunks, so this
-    // is the real agentTick/onDone call sites under test, not a reimplementation of them.
+    // --- OutputTail: whole lines out of arbitrary pipe chunks ---
+    // The notch could take "the newest line in this chunk" and drop the rest. A card
+    // showing a tail cannot, so lines split across chunk boundaries have to be rejoined —
+    // exactly the hazard NeedScanner exists for, on the display path this time.
+    var tail = OutputTail(cap: 3)
+    tail.feed("one\ntw")
+    assert(tail.lines == ["one"], "a half-line must wait for its newline: \(tail.lines)")
+    tail.feed("o\nthree\n")
+    assert(tail.lines == ["one", "two", "three"], "the split line must be rejoined: \(tail.lines)")
+    tail.feed("four\n")
+    assert(tail.lines == ["two", "three", "four"], "the cap drops the oldest, not the newest")
+    tail.feed("\r\n   \n")
+    assert(tail.lines == ["two", "three", "four"], "blank and whitespace-only lines are not output")
+    tail.feed("last, no newline")
+    assert(tail.newest == "four", "an unterminated line is not shown until flush")
+    tail.flush()
+    assert(tail.newest == "last, no newline",
+           "flush must surface the final line — it is the one carrying the result")
+
+    // --- one card per run: no shared slot left to cross-wire ---
+    // The regression this replaces: a single `gate` meant a second agent's question
+    // overwrote the first's, and Confirm then resumed whichever session was in the box.
     MainActor.assumeIsolated {
-        let gateState = AppState()
-        assert(!gateState.notchExpanded, "an idle notch has nothing to show")
-        var scanner = NeedScanner()
-        gateState.feedGate("NEED: does the gate work?\n", into: &scanner, session: "T", process: nil)
-        assert(gateState.pendingNeed == "does the gate work?", "feedGate must open the gate on a complete line")
-        assert(gateState.notchExpanded, "a pending NEED: must keep the notch open")
-        gateState.cancelNeed()
-        assert(gateState.pendingNeed == nil, "Cancel must clear the question")
-        assert(!gateState.notchExpanded, "clearing the only reason to be open must close it")
+        let a = AgentRun(task: "A's job", session: "SESSION-A")
+        let b = AgentRun(task: "B's job", session: "SESSION-B")
+        a.absorb("NEED: A's question\n")
+        b.absorb("NEED: B's question\n")
+        assert(a.status == .asking("A's question") && a.session == "SESSION-A",
+               "each run keeps its own question and the session that asked it")
+        assert(b.status == .asking("B's question") && b.session == "SESSION-B",
+               "a second run must not disturb the first")
     }
 
-    // The agent's last line usually has no trailing newline — feedGate alone must not
-    // catch it; only finishGate's flush does, at exit.
+    // A NEED: only counts once its line is complete; the agent's last line usually has no
+    // trailing newline, so `finish` has to flush or the gate silently never opens.
     MainActor.assumeIsolated {
-        let gateState = AppState()
-        var scanner = NeedScanner()
-        gateState.feedGate("NEED: no trailing newline", into: &scanner, session: "T", process: nil)
-        assert(gateState.pendingNeed == nil, "an incomplete line must not open the gate yet")
-        let outcome = gateState.finishGate(flushing: &scanner, session: "T", exitCode: 0)
-        assert(gateState.pendingNeed == "no trailing newline", "finishGate's flush must catch the unterminated last line")
-        assert(outcome.line == "❓ no trailing newline" && !outcome.fades, "finishGate must report the same gated outcome")
+        let run = AgentRun(task: "t", session: "S")
+        run.absorb("NEED: no trailing newline")
+        assert(run.status == .running, "an incomplete line must not open the gate yet")
+        run.finish(exitCode: 0)
+        assert(run.status == .asking("no trailing newline"),
+               "the flush at exit must catch the unterminated last line")
     }
 
-    // Critical regression: the question and the session Confirm resumes must always be
-    // the SAME atomic value. A second run's gate must never leave the first run's
-    // question paired with the second run's session (or vice versa) — there is no
-    // separate `needSession`-style slot left to desync from `pendingNeed` at all.
+    // Exit code 0 on a run that already asked means "paused as instructed", not "done" —
+    // the card must keep its Confirm rather than flipping to a green tick.
     MainActor.assumeIsolated {
-        let gateState = AppState()
-        var scannerA = NeedScanner()
-        var scannerB = NeedScanner()
-        gateState.feedGate("NEED: A's question\n", into: &scannerA, session: "SESSION-A", process: nil)
-        assert(gateState.gate?.session == "SESSION-A" && gateState.pendingNeed == "A's question")
-        gateState.feedGate("NEED: B's question\n", into: &scannerB, session: "SESSION-B", process: nil)
-        assert(gateState.pendingNeed == "B's question" && gateState.gate?.session == "SESSION-B",
-               "the question on screen and the session Confirm would resume must always travel together")
+        let run = AgentRun(task: "t", session: "S")
+        run.absorb("NEED: may I submit?\n")
+        run.finish(exitCode: 0)
+        assert(run.status == .asking("may I submit?"), "a gated run stays gated through its own exit")
+        assert(!run.isFinished, "a run waiting on the user is not finished")
     }
 
-    // Cancel must actually stop a still-running gate process, not just forget about it —
-    // a paused agent has usually already exited by the time onDone opens a gate, but a
-    // gate opened mid-stream (feedGate, before exit is confirmed) can still be live.
+    // --- the notch is talk-only now ---
+    // Agents held it open for as long as they ran, which put the mic — the one control
+    // anybody reaches for — inside a panel busy reporting something else.
     MainActor.assumeIsolated {
-        let gateState = AppState()
+        let s = AppState()
+        assert(!s.notchExpanded, "an idle notch has nothing to show")
+        s.agents.append(AgentRun(task: "long job", session: "S"))
+        assert(!s.notchExpanded, "a running agent must not hold the notch open")
+        s.agents[0].absorb("NEED: something?\n")
+        assert(!s.notchExpanded, "not even a question: it has a card, with its own Confirm")
+        s.isListening = true
+        assert(s.notchExpanded, "talking still opens it")
+    }
+
+    // Ending the conversation must not kill background work. Both ✕ and Start over used
+    // to terminate agents, which meant you could not say a single word to Debby without
+    // destroying a job that was halfway through writing a file.
+    MainActor.assumeIsolated {
+        let s = AppState()
         let sleepy = Process()
         sleepy.executableURL = URL(fileURLWithPath: "/bin/sleep")
         sleepy.arguments = ["30"]
         try! sleepy.run()
-        assert(sleepy.isRunning, "the process must actually be running before this test means anything")
-        var scanner = NeedScanner()
-        gateState.feedGate("NEED: still running\n", into: &scanner, session: "C", process: sleepy)
-        gateState.cancelNeed()
-        // terminate() delivers SIGTERM; the kernel takes a moment to land it.
-        for _ in 0..<100 where sleepy.isRunning { usleep(20_000) }
-        assert(!sleepy.isRunning, "Cancel must terminate a gate's still-running process, not just forget it")
+        let run = AgentRun(task: "keeps going", session: "S")
+        run.process = sleepy
+        s.agents.append(run)
+        s.dismiss()
+        s.newChat()
+        s.submit("what is on my screen")
+        assert(s.agents.count == 1 && sleepy.isRunning,
+               "✕, Start over and a new turn all leave running agents alone")
+        // Stop, though, must actually reach the process — not just forget about it.
+        s.stop(run)
+        for _ in 0..<100 where sleepy.isRunning { usleep(20_000) }   // SIGTERM takes a moment
+        assert(!sleepy.isRunning, "Stop must terminate the agent, not just drop the reference")
+        assert(run.status == .stopped, "and the card must say so")
     }
 
-    // --- Profile: pulling JSON out of a model's answer ---
-    assert(Profile.extractJSON("```json\n{\"a\":1}\n```") == "{\"a\":1}",
-           "markdown fences must come off")
-    assert(Profile.extractJSON("Here you go:\n{\"a\":1}\nhope that helps") == "{\"a\":1}",
-           "prose either side must come off")
-    assert(Profile.extractJSON("{\"a\":{\"b\":2}}") == "{\"a\":{\"b\":2}}",
-           "nested braces must survive")
-    assert(Profile.extractJSON("no json here") == nil, "garbage yields nil, not a guess")
-    assert(Profile.extractJSON("{not valid json}") == nil,
-           "syntactically invalid JSON must be rejected, not written to disk")
-    assert(Profile.extractJSON("") == nil, "empty output yields nil")
+    // --- Profile: strict schema and source provenance ---
+    let profileRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("heydebby-profile-selfcheck-\(UUID().uuidString)", isDirectory: true)
+    let allowedRoot = profileRoot.appendingPathComponent("Documents", isDirectory: true)
+    let outsideRoot = profileRoot.appendingPathComponent("Outside", isDirectory: true)
+    try! FileManager.default.createDirectory(at: allowedRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+    let sourceFile = allowedRoot.appendingPathComponent("identity.txt")
+    let outsideFile = outsideRoot.appendingPathComponent("secret.txt")
+    try! Data("identity".utf8).write(to: sourceFile)
+    try! Data("outside".utf8).write(to: outsideFile)
+    let symlink = allowedRoot.appendingPathComponent("escaped.txt")
+    try! FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: outsideFile)
+
+    let validProfile = "Here it is:\n{\"full_name\":{\"value\":\"Debby User\",\"source\":\"\(sourceFile.path)\"}}\nDone"
+    let validProfileData = try! Profile.validateAndEncode(validProfile, allowedRoots: [allowedRoot])
+    let decodedProfile = try! JSONDecoder().decode([String: ProfileField].self, from: validProfileData)
+    assert(decodedProfile["full_name"] == ProfileField(value: "Debby User", source: sourceFile.path),
+           "valid in-root profile must be typed and re-encoded")
+    assert(Profile.isValidStoredData(validProfileData), "new typed profiles must be readable")
+    assert(!Profile.isValidStoredData(Data("{\"full_name\":\"legacy scalar\"}".utf8)),
+           "legacy syntax-only profiles must not be offered to a browser agent")
+
+    func profileRejected(_ raw: String) -> Bool {
+        do { _ = try Profile.validateAndEncode(raw, allowedRoots: [allowedRoot]); return false }
+        catch { return true }
+    }
+    assert(profileRejected("{\"full_name\":\"Debby User\"}"), "scalar fields must be rejected")
+    assert(profileRejected("{}"), "an empty profile must be rejected")
+    assert(profileRejected("{\"Full Name\":{\"value\":\"Debby\",\"source\":\"\(sourceFile.path)\"}}"),
+           "field names must use lower snake case")
+    assert(profileRejected("{\"full_name\":{\"value\":\"\",\"source\":\"\(sourceFile.path)\"}}"),
+           "empty values must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"relative.txt\"}}"),
+           "relative source paths must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(allowedRoot.appendingPathComponent("missing.txt").path)\"}}"),
+           "missing source files must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\\u0001\",\"source\":\"\(sourceFile.path)\"}}"),
+           "control characters in values must be rejected")
+    let oversizedValue = String(repeating: "x", count: 4_097)
+    assert(profileRejected("{\"full_name\":{\"value\":\"\(oversizedValue)\",\"source\":\"\(sourceFile.path)\"}}"),
+           "oversized values must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(outsideFile.path)\"}}"),
+           "existing sibling files must be outside the allowed root")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(symlink.path)\"}}"),
+           "a symlink inside the root must not escape it")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(sourceFile.path)\",\"extra\":true}}"),
+           "extra entry properties must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(sourceFile.path)\"},\"bad key\":1}"),
+           "one invalid entry must reject the entire profile")
+    assert(profileRejected("{not valid json}"), "malformed JSON must be rejected")
+
+    let disposableProfile = profileRoot.appendingPathComponent("profile.json")
+    let disposableLog = profileRoot.appendingPathComponent("debby.log")
+    try! Data("private profile".utf8).write(to: disposableProfile)
+    try! Data("private log".utf8).write(to: disposableLog)
+    try! Profile.deletePrivateData(profileURL: disposableProfile, logURL: disposableLog)
+    assert(!FileManager.default.fileExists(atPath: disposableProfile.path)
+           && !FileManager.default.fileExists(atPath: disposableLog.path),
+           "privacy deletion must remove both profile and diagnostic log")
+    try! Profile.deletePrivateData(profileURL: disposableProfile, logURL: disposableLog)
+    try? FileManager.default.removeItem(at: profileRoot)
+
+    // --- rail geometry: the window is wide, the mouse trap is not ---
+    // The panel is always full expanded width so a card can grow leftward without being
+    // clipped. If that whole width caught clicks it would black-hole a 380pt column of
+    // whatever is underneath, so only the drawn cards' width is live.
+    let vis = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let idleHit = railHitRect(visible: vis, expanded: false)
+    let openHit = railHitRect(visible: vis, expanded: true)
+    assert(idleHit.maxX == vis.maxX && openHit.maxX == vis.maxX, "the rail is anchored to the right edge")
+    assert(idleHit.width < openHit.width, "hovering widens the trap to cover the expanded card")
+    assert(idleHit.width < RailMetrics.expanded,
+           "an un-hovered rail must not swallow clicks across the expanded width")
+    assert(idleHit.height == vis.height && idleHit.minY == vis.minY, "cards can sit anywhere down the edge")
+    // Without the widening, moving onto the part of the card that just appeared would
+    // leave the trap, collapse the card, and re-enter it — a flicker loop, not a hover.
+    let grownEdge = openHit.minX + RailMetrics.margin
+    assert(grownEdge < idleHit.minX, "the expanded card's new area must be inside the widened trap")
+
+    // --- which cards expire ---
+    // A failure keeps its card: the exit code and last lines are the whole diagnosis, and
+    // one that deletes itself twelve seconds later guarantees nobody reads it.
+    assert(railTTL(for: .done) != nil && railTTL(for: .stopped) != nil, "finished cards tidy themselves away")
+    assert(railTTL(for: .failed(1)) == nil, "a failure waits to be read and dismissed")
+    assert(railTTL(for: .running) == nil && railTTL(for: .asking("q")) == nil,
+           "a live or waiting card never expires out from under the user")
+
+    // --- Warmup: warm the host the next request actually goes to ---
+    // Each brain's host is asserted against the URL its own file builds, so renaming an
+    // endpoint without updating the warmup shows up here rather than as a silent no-op
+    // that warms a host nobody calls.
+    assert(Warmup.hosts(brain: "claude", voiceSource: "") == ["https://api.anthropic.com"],
+           "claude warms Anthropic: \(Warmup.hosts(brain: "claude", voiceSource: ""))")
+    assert(Warmup.hosts(brain: "openai", voiceSource: "") == ["https://api.openai.com"],
+           "openai warms OpenAI")
+    assert(Warmup.hosts(brain: "codex", voiceSource: "") == ["https://chatgpt.com"],
+           "codex posts to chatgpt.com, not api.openai.com")
+    assert(Warmup.hosts(brain: "gemini", voiceSource: "")
+           == ["https://generativelanguage.googleapis.com"], "gemini warms its own host")
+    // The CLI brains open their own connections in a subprocess — warming a host in THIS
+    // process fills a pool they never read from.
+    assert(Warmup.hosts(brain: "claudecli", voiceSource: "").isEmpty,
+           "a CLI brain has no host of ours to warm")
+    assert(Warmup.hosts(brain: "claudecli", voiceSource: "elevenlabs")
+           == ["https://api.elevenlabs.io"],
+           "voice is warmed independently of the brain — a CLI brain still speaks")
+    assert(Warmup.hosts(brain: "claude", voiceSource: "elevenlabs").count == 2,
+           "both the brain and the voice get warmed when both are ours")
+}
+
+if CommandLine.arguments.contains("--browser-policy-hook") {
+    let input = FileHandle.standardInput.readDataToEndOfFile()
+    FileHandle.standardOutput.write(BrowserPolicy.evaluateHookJSON(input))
+    exit(0)
 }
 
 if CommandLine.arguments.contains("--selfcheck") {
@@ -775,17 +1007,20 @@ if let i = CommandLine.arguments.firstIndex(of: "--notchcheck") {
             .tiffRepresentation.flatMap({ NSBitmapImageRep(data: $0) })?.representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1] + ".settings.png"))
         }
+        let idle = AppState()
         let state = AppState()
         state.isListening = true
         state.partial = "why is this build failing"
         state.container = CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.4)
         state.levels = (0..<28).map { CGFloat(abs(sin(Double($0) * 0.8)) * 0.85 + 0.1) }
         let sheet = VStack(spacing: 12) {
-            NotchView().environmentObject(state)
+            NotchView().environmentObject(state).environmentObject(state.drawingController)
             // The pointer at 4x, triangle vs. listening — they must occupy the same box.
+            // Both env objects, or the render traps: DebbyPointerView reads the pointer
+            // as well as the state.
             HStack(spacing: 40) {
-                DebbyPointerView().environmentObject(AppState())
-                DebbyPointerView().environmentObject(state)
+                DebbyPointerView().environmentObject(idle).environmentObject(idle.pointer)
+                DebbyPointerView().environmentObject(state).environmentObject(state.pointer)
             }
             .scaleEffect(4)
             .frame(height: 140)
@@ -798,6 +1033,36 @@ if let i = CommandLine.arguments.firstIndex(of: "--notchcheck") {
             .representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
             print("wrote \(CommandLine.arguments[i + 1])")
+        }
+
+        // The rail, every status at once, with one card expanded — the layout question
+        // ("is a pill readable at a glance, does the tail fit") is the kind you have to
+        // look at, and four concurrent agents in four different states is otherwise a
+        // slow thing to stage by hand.
+        let rs = AppState()
+        let mk = { (task: String, session: String, lines: [String], status: AgentRun.Status) -> AgentRun in
+            let run = AgentRun(task: task, session: session)
+            lines.forEach { run.absorb($0 + "\n") }
+            if case .asking(let q) = status { run.absorb("NEED: \(q)\n") } else { run.status = status }
+            return run
+        }
+        rs.agents = [
+            mk("turn the receipts in my Downloads into a spreadsheet of what I spent",
+               "S1", ["Reading Downloads/…", "Found 14 receipts", "uv run --with openpyxl python"], .running),
+            mk("book the 9am slot", "S2", ["Filling the form…"], .asking("about to submit the booking — ok?")),
+            mk("make a deck from my notes", "S3", ["Wrote deck.pptx"], .done),
+            mk("email the team", "S4", ["error: not connected"], .failed(1)),
+        ]
+        rs.railHover = rs.agents[0].id
+        let railSheet = AgentRailView().environmentObject(rs)
+            .frame(width: RailMetrics.expanded + RailMetrics.margin * 2, height: 420)
+            .background(Color(white: 0.30))
+        let rr = ImageRenderer(content: railSheet)
+        rr.scale = 2
+        if let png = rr.nsImage?.tiffRepresentation.flatMap({ NSBitmapImageRep(data: $0) })?
+            .representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1] + ".rail.png"))
+            print("wrote \(CommandLine.arguments[i + 1]).rail.png")
         }
     }
     exit(0)
@@ -990,6 +1255,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = AppState()
     var statusItem: NSStatusItem!
     var notch: NotchWindow!
+    /// Built at launch but not shown: `AppState.showRail()` orders it in when the first
+    /// agent starts, and the last card's removal orders it back out.
+    var rail: AgentRailWindow!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -999,7 +1267,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         notch = NotchWindow(state: state)
         state.notch = notch
+        rail = AgentRailWindow(state: state)
+        state.rail = rail
         state.pointer.start(state: state)
+
+        // The first question carries a screenshot; open the TLS session before it's asked.
+        Warmup.begin(brain: state.backend,
+                     voiceSource: UserDefaults.standard.string(forKey: "voiceSource") ?? "")
 
         Hotkey.watchTalkChord { [weak self] down, held in
             self?.state.talkChord(down: down, heldFor: held)
@@ -1014,6 +1288,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // that needs Accessibility. Prompts if missing; the grant needs a relaunch.
         let ax = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
         NSLog("HeyDebby: accessibility=\(ax) — ⌃⌥ hold-to-talk is dead without it")
+        submitLaunchTasks()
+    }
+
+    /// `--agent "task" ["task" …]` submits tasks at launch, exactly as if they had been
+    /// dictated. The rail's real behaviour — several agents at once, click-through, hover,
+    /// Confirm on the right card — otherwise needs a microphone and a lot of talking to
+    /// reach, which is a poor way to check a window. Same intent as `--notchcheck`: the
+    /// screen is the thing under test, so put something real on it.
+    private func submitLaunchTasks() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--agent") else { return }
+        for task in args[(i + 1)...] where !task.hasPrefix("--") {
+            state.submit("agent: " + task)
+        }
     }
 
     @objc func talk() { state.toggleListening() }

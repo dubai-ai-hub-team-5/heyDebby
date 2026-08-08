@@ -11,9 +11,9 @@ final class LessonPlayer {
     var onSay: ((String) -> Void)?
     var onDraw: ((ShapeSpec) -> Void)?
     var onPoint: ((Annotation) -> Void)?
-    /// Fires and continues, like `.draw`/`.point` — no callback exists for an
-    /// AppleScript's completion, and waiting on one would stall the whole lesson.
-    var onRun: ((String) -> Void)?
+    /// Fires and continues, like `.draw`/`.point`; execution completion does not stall
+    /// narration because every action is a small, closed operation.
+    var onAction: ((AppAction) -> Void)?
     /// Queue drained and no more beats coming — where auto-advance hangs off.
     var onIdle: (() -> Void)?
 
@@ -69,7 +69,7 @@ final class LessonPlayer {
             case .say(let t):
                 if speechEnabled { speaking = true }
                 onSay?(t)
-            case .run(let s):   onRun?(s)
+            case .action(let a): onAction?(a)
             }
         }
         if !speaking, queue.isEmpty, !streamOpen, !idleFired {
