@@ -173,10 +173,10 @@ which is far too big a hammer for connecting an app. `claude` takes
 
 ## When something doesn't work
 
-**⚙︎ → Open log…** — `~/Library/Logs/HeyDebby/debby.log`. Every CLI invocation Debby
-makes is recorded: the full command, the output verbatim as it streams, and the exit
-code. Streaming matters — a run that hangs still leaves a trail. Trimmed to the last
-500 KB once it passes 2 MB. Local only, but it does contain your prompts.
+**⚙︎ → Open log…** — `~/Library/Logs/HeyDebby/debby.log`. Ordinary CLI invocations record
+the full command, streamed output, and exit code. Document/profile scans are private: only
+their generic start and exit status are logged, never the scan prompt or extracted values.
+The log is trimmed to the last 500 KB once it passes 2 MB and is readable only by your user.
 
 The failure worth knowing about: `user cancelled MCP tool call` means `codex exec`
 auto-denied a Composio *write* (send an email, create a connection). Codex can't

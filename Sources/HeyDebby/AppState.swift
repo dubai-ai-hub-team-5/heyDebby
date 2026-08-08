@@ -634,9 +634,9 @@ final class AppState: ObservableObject {
             }
             self.drawingController.shapes.append(shape)
         }
-        player.onRun = { [weak self] script in
+        player.onAction = { [weak self] action in
             guard let self, self.chatGeneration == gen, self.appControl else { return }
-            Control.run([script]) { [weak self] code, out in
+            Control.run(action) { [weak self] code, out in
                 // osascript can take seconds; a new chat may already have started by the
                 // time it returns. Recheck, same as onIdle does after its own async gap —
                 // a stale error must not land on top of a conversation it isn't about.
@@ -798,8 +798,7 @@ final class AppState: ObservableObject {
     func enableBrowserControl() {
         let dir = Profile.url.deletingLastPathComponent()
             .appendingPathComponent("browser").path
-        let cmd = "claude mcp add playwright --scope user -- npx -y @playwright/mcp@latest "
-                + "--user-data-dir \(shellQuote(dir))"
+        let cmd = browserSetupCommand(userDataDir: dir)
         choreBusy = true
         choreLine = "setting up the browser…"
         Task {
@@ -815,14 +814,22 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Undoes `enableBrowserControl()`. Without this, switching the toggle off would only
-    /// stop attaching `browserNote` to future tasks (see `runAgent`) while the Playwright
-    /// server stayed registered and `mcp__playwright` stayed in every claude agent's
-    /// allowlist (unconditionally — see `agentCommand`'s comment) — the one guardrail
-    /// gone, the capability still fully callable. Fire-and-forget: `claude mcp remove` on
-    /// a server that was never added, or already removed, is a harmless no-op either way.
+    /// Per-run tool grants are the authorization boundary, but removing the user-scoped
+    /// registration keeps the user's other Claude sessions truthful when this is off.
     func disableBrowserControl() {
-        Task { _ = try? await shellOutput("claude mcp remove playwright --scope user") }
+        choreBusy = true
+        choreLine = "removing browser access…"
+        Task {
+            do {
+                _ = try await shellOutput("claude mcp remove playwright --scope user")
+                choreLine = "✅ browser access removed"
+            } catch {
+                UserDefaults.standard.set(true, forKey: "browserControl")
+                choreLine = "❌ \(error.localizedDescription)"
+            }
+            choreBusy = false
+            choreFade()
+        }
     }
 
     /// One agent run that reads the user's documents and prints JSON. It goes through
@@ -835,16 +842,18 @@ final class AppState: ObservableObject {
     ///
     /// The agent is never granted Write: it prints, Swift writes the file.
     func scanDocuments() {
-        let folders = docsFolder.isEmpty
-            ? "~/Documents, ~/Desktop and ~/Downloads"
-            : docsFolder
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let roots = docsFolder.isEmpty
+            ? ["Documents", "Desktop", "Downloads"].map { home.appendingPathComponent($0, isDirectory: true) }
+            : [URL(fileURLWithPath: docsFolder, isDirectory: true)]
+        let folders = roots.map(\.path).joined(separator: ", ")
         let prompt = """
         Read the documents in \(folders) and extract the personal details a form would ask \
         for — full name, date of birth, passport number and expiry, driving licence, \
         national insurance or social security number, address, phone, email. \
         Print ONE JSON object and nothing else, shaped like \
-        {"passport_number":{"value":"K1234567","source":"~/Documents/passport.pdf"}}. \
-        Use snake_case keys. Omit anything you cannot find — never guess a value. \
+        {"passport_number":{"value":"K1234567","source":"/absolute/path/passport.pdf"}}. \
+        Use snake_case keys and the real absolute source path. Omit anything you cannot find — never guess a value. \
         Do not write any files.
         """
         choreBusy = true
@@ -855,6 +864,7 @@ final class AppState: ObservableObject {
         let out = OutputBox()
         AgentRunner.spawn(cliPathPrefix + "claude -p \(shellQuote(prompt)) "
                           + "--allowedTools Read Glob Grep",
+                          logging: .privateOutput(label: "profile scan"),
                           onOutput: { [weak self] chunk in
                               out.append(chunk)
                               Task { @MainActor in self?.choreTick(chunk) }
@@ -863,13 +873,9 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.choreBusy = false
-                guard let json = Profile.extractJSON(out.text) else {
-                    self.choreLine = "❌ couldn't read your documents"
-                    self.choreFade()
-                    return
-                }
                 do {
-                    try Profile.write(json)
+                    let data = try Profile.validateAndEncode(out.text, allowedRoots: roots)
+                    try Profile.write(data)
                     self.choreLine = "✅ profile saved"
                 } catch {
                     self.choreLine = "❌ \(error.localizedDescription)"
@@ -877,6 +883,16 @@ final class AppState: ObservableObject {
                 self.choreFade()
             }
         })
+    }
+
+    func deleteProfile() {
+        do {
+            try Profile.deletePrivateData()
+            choreLine = "✅ profile and private logs deleted"
+        } catch {
+            choreLine = "❌ \(error.localizedDescription)"
+        }
+        choreFade()
     }
 
     /// A settings chore's ticker: one line, the newest, same as the notch used to be.

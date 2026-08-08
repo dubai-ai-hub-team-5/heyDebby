@@ -798,7 +798,7 @@ struct ProfileSection: View {
                     .controlSize(.small).disabled(state.choreBusy)
                 if state.choreBusy { ProgressView().controlSize(.mini) }
                 Spacer(minLength: 4)
-                Button("Delete profile") { Profile.delete() }
+                Button("Delete profile") { state.deleteProfile() }
                     .controlSize(.small)
             }
             .frame(width: 260)
@@ -933,15 +933,9 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)
             }
-            Toggle("Let Debby control apps (volume, Spotify, menus)", isOn: $appControl)
-            Text("Debby runs short AppleScript commands. macOS asks permission the first "
-                 + "time she talks to a named app, in Privacy & Security → Automation — "
-                 + "some commands, like volume, don't go through that gate at all.")
-                .font(.caption).foregroundStyle(.secondary)
-                .frame(width: 260, alignment: .leading)
-            Text("Once you allow an app, Debby can control it fully, not just the one thing "
-                 + "you asked for. She also decides what to run from what's on your screen, "
-                 + "so a web page or email can influence it. Leave this off unless you want that.")
+            Toggle("Let Debby control volume and media", isOn: $appControl)
+            Text("Debby can change volume and control play/pause, next, or previous in "
+                 + "Music and Spotify. These are fixed actions, not generated scripts.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(width: 260, alignment: .leading)
             Toggle("Let Debby fill forms in a real browser (Playwright)", isOn: Binding(
@@ -953,9 +947,9 @@ struct SettingsView: View {
             ))
             .disabled(!Claude.CLI.isLoggedIn)
             if Claude.CLI.isLoggedIn {
-                Text("Debby fills forms in a real browser and stops for your OK before "
-                     + "anything is submitted. Registers a browser tool with the claude "
-                     + "CLI, so your other claude sessions can see it too.")
+                Text("Debby fills safe fields automatically. Passwords, payments and final "
+                     + "submissions stay in the visible browser for you. HeyDebby grants the "
+                     + "tool only while this is on; user-scoped Claude sessions can also see its registration.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)
             } else {
