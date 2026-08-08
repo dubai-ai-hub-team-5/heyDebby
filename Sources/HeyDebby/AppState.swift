@@ -768,16 +768,18 @@ final class AppState: ObservableObject {
     ///
     /// The agent is never granted Write: it prints, Swift writes the file.
     func scanDocuments() {
-        let folders = docsFolder.isEmpty
-            ? "~/Documents, ~/Desktop and ~/Downloads"
-            : docsFolder
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let roots = docsFolder.isEmpty
+            ? ["Documents", "Desktop", "Downloads"].map { home.appendingPathComponent($0, isDirectory: true) }
+            : [URL(fileURLWithPath: docsFolder, isDirectory: true)]
+        let folders = roots.map(\.path).joined(separator: ", ")
         let prompt = """
         Read the documents in \(folders) and extract the personal details a form would ask \
         for — full name, date of birth, passport number and expiry, driving licence, \
         national insurance or social security number, address, phone, email. \
         Print ONE JSON object and nothing else, shaped like \
-        {"passport_number":{"value":"K1234567","source":"~/Documents/passport.pdf"}}. \
-        Use snake_case keys. Omit anything you cannot find — never guess a value. \
+        {"passport_number":{"value":"K1234567","source":"/absolute/path/passport.pdf"}}. \
+        Use snake_case keys and the real absolute source path. Omit anything you cannot find — never guess a value. \
         Do not write any files.
         """
         agentBusy = true
@@ -797,13 +799,9 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.agentBusy = false
-                guard let json = Profile.extractJSON(out.text) else {
-                    self.agentLine = "❌ couldn't read your documents"
-                    self.agentFade()
-                    return
-                }
                 do {
-                    try Profile.write(json)
+                    let data = try Profile.validateAndEncode(out.text, allowedRoots: roots)
+                    try Profile.write(data)
                     self.agentLine = "✅ profile saved"
                 } catch {
                     self.agentLine = "❌ \(error.localizedDescription)"
@@ -811,6 +809,16 @@ final class AppState: ObservableObject {
                 self.agentFade()
             }
         })
+    }
+
+    func deleteProfile() {
+        do {
+            try Profile.deletePrivateData()
+            agentLine = "✅ profile and private logs deleted"
+        } catch {
+            agentLine = "❌ \(error.localizedDescription)"
+        }
+        agentFade()
     }
 
     /// Opens the gate: one atomic value binding the question to the session that asked it

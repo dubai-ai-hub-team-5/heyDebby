@@ -691,17 +691,65 @@ func runSelfCheck() {
         assert(!sleepy.isRunning, "Cancel must terminate a gate's still-running process, not just forget it")
     }
 
-    // --- Profile: pulling JSON out of a model's answer ---
-    assert(Profile.extractJSON("```json\n{\"a\":1}\n```") == "{\"a\":1}",
-           "markdown fences must come off")
-    assert(Profile.extractJSON("Here you go:\n{\"a\":1}\nhope that helps") == "{\"a\":1}",
-           "prose either side must come off")
-    assert(Profile.extractJSON("{\"a\":{\"b\":2}}") == "{\"a\":{\"b\":2}}",
-           "nested braces must survive")
-    assert(Profile.extractJSON("no json here") == nil, "garbage yields nil, not a guess")
-    assert(Profile.extractJSON("{not valid json}") == nil,
-           "syntactically invalid JSON must be rejected, not written to disk")
-    assert(Profile.extractJSON("") == nil, "empty output yields nil")
+    // --- Profile: strict schema and source provenance ---
+    let profileRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("heydebby-profile-selfcheck-\(UUID().uuidString)", isDirectory: true)
+    let allowedRoot = profileRoot.appendingPathComponent("Documents", isDirectory: true)
+    let outsideRoot = profileRoot.appendingPathComponent("Outside", isDirectory: true)
+    try! FileManager.default.createDirectory(at: allowedRoot, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+    let sourceFile = allowedRoot.appendingPathComponent("identity.txt")
+    let outsideFile = outsideRoot.appendingPathComponent("secret.txt")
+    try! Data("identity".utf8).write(to: sourceFile)
+    try! Data("outside".utf8).write(to: outsideFile)
+    let symlink = allowedRoot.appendingPathComponent("escaped.txt")
+    try! FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: outsideFile)
+
+    let validProfile = "Here it is:\n{\"full_name\":{\"value\":\"Debby User\",\"source\":\"\(sourceFile.path)\"}}\nDone"
+    let validProfileData = try! Profile.validateAndEncode(validProfile, allowedRoots: [allowedRoot])
+    let decodedProfile = try! JSONDecoder().decode([String: ProfileField].self, from: validProfileData)
+    assert(decodedProfile["full_name"] == ProfileField(value: "Debby User", source: sourceFile.path),
+           "valid in-root profile must be typed and re-encoded")
+
+    func profileRejected(_ raw: String) -> Bool {
+        do { _ = try Profile.validateAndEncode(raw, allowedRoots: [allowedRoot]); return false }
+        catch { return true }
+    }
+    assert(profileRejected("{\"full_name\":\"Debby User\"}"), "scalar fields must be rejected")
+    assert(profileRejected("{}"), "an empty profile must be rejected")
+    assert(profileRejected("{\"Full Name\":{\"value\":\"Debby\",\"source\":\"\(sourceFile.path)\"}}"),
+           "field names must use lower snake case")
+    assert(profileRejected("{\"full_name\":{\"value\":\"\",\"source\":\"\(sourceFile.path)\"}}"),
+           "empty values must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"relative.txt\"}}"),
+           "relative source paths must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(allowedRoot.appendingPathComponent("missing.txt").path)\"}}"),
+           "missing source files must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\\u0001\",\"source\":\"\(sourceFile.path)\"}}"),
+           "control characters in values must be rejected")
+    let oversizedValue = String(repeating: "x", count: 4_097)
+    assert(profileRejected("{\"full_name\":{\"value\":\"\(oversizedValue)\",\"source\":\"\(sourceFile.path)\"}}"),
+           "oversized values must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(outsideFile.path)\"}}"),
+           "existing sibling files must be outside the allowed root")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(symlink.path)\"}}"),
+           "a symlink inside the root must not escape it")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(sourceFile.path)\",\"extra\":true}}"),
+           "extra entry properties must be rejected")
+    assert(profileRejected("{\"full_name\":{\"value\":\"Debby\",\"source\":\"\(sourceFile.path)\"},\"bad key\":1}"),
+           "one invalid entry must reject the entire profile")
+    assert(profileRejected("{not valid json}"), "malformed JSON must be rejected")
+
+    let disposableProfile = profileRoot.appendingPathComponent("profile.json")
+    let disposableLog = profileRoot.appendingPathComponent("debby.log")
+    try! Data("private profile".utf8).write(to: disposableProfile)
+    try! Data("private log".utf8).write(to: disposableLog)
+    try! Profile.deletePrivateData(profileURL: disposableProfile, logURL: disposableLog)
+    assert(!FileManager.default.fileExists(atPath: disposableProfile.path)
+           && !FileManager.default.fileExists(atPath: disposableLog.path),
+           "privacy deletion must remove both profile and diagnostic log")
+    try! Profile.deletePrivateData(profileURL: disposableProfile, logURL: disposableLog)
+    try? FileManager.default.removeItem(at: profileRoot)
 }
 
 if CommandLine.arguments.contains("--browser-policy-hook") {

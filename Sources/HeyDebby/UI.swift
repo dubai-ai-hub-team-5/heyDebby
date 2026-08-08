@@ -823,7 +823,7 @@ struct ProfileSection: View {
                     .controlSize(.small).disabled(state.agentBusy)
                 if state.agentBusy { ProgressView().controlSize(.mini) }
                 Spacer(minLength: 4)
-                Button("Delete profile") { Profile.delete() }
+                Button("Delete profile") { state.deleteProfile() }
                     .controlSize(.small)
             }
             .frame(width: 260)
