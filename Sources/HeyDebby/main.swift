@@ -378,7 +378,7 @@ func runSelfCheck() {
     // Without an allowlist `claude -p` denies every tool, so app tasks fail silently.
     // The prompt must come before --allowedTools, which is variadic and eats what follows.
     let cl = agentCommand(backend: "claude", task: "email bob", screenshotPath: nil, fullAccess: false, appControl: true)
-    assert(cl.hasSuffix("--allowedTools mcp__composio mcp__playwright Read Glob Grep Bash(osascript:*)"),
+    assert(cl.hasSuffix("--allowedTools mcp__composio Read Glob Grep Bash(osascript:*)"),
            "claude agent needs tools: \(cl)")
     assert(cl.range(of: "'email bob'")!.upperBound <= cl.range(of: "--allowedTools")!.lowerBound,
            "prompt must precede the variadic flag: \(cl)")
@@ -443,15 +443,30 @@ func runSelfCheck() {
     assert(gateFull.contains("-r \(shellQuote(uuid))"), "full access still resumes the same session: \(gateFull)")
     assert(!gateFull.contains("--session-id"), "resume must not also pin a fresh session: \(gateFull)")
 
-    // --- browser control: the Playwright gateway + browserNote ---
-    // Browser tasks need the playwright gateway; the allowlist stays last.
+    // --- browser control: capability and policy are both per run ---
+    let noBrowser = agentCommand(backend: "claude", task: "book a slot", screenshotPath: nil,
+                                 fullAccess: false, session: "S1")
+    assert(!noBrowser.contains("mcp__playwright") && !noBrowser.contains("--settings"),
+           "browser off must remove both the tool and its policy settings: \(noBrowser)")
     let br = agentCommand(backend: "claude", task: "book a slot", screenshotPath: nil,
-                          fullAccess: false, session: "S1")
+                          fullAccess: false, session: "S1", browser: true,
+                          settingsPath: "/tmp/hey debby policy.json")
     assert(br.contains("mcp__playwright"), "the browser gateway must be allowed: \(br)")
+    assert(br.contains("--settings '/tmp/hey debby policy.json'"),
+           "browser runs must carry their app-scoped policy: \(br)")
     // Do not assert on the last token — the app-control plan appends to this list.
     assert(br.range(of: "--allowedTools")!.lowerBound
            > br.range(of: "'book a slot'")!.lowerBound,
            "--allowedTools is variadic and must stay after the prompt")
+    let browserFull = agentCommand(backend: "claude", task: "book a slot", screenshotPath: nil,
+                                   fullAccess: true, session: "S2", browser: true,
+                                   settingsPath: "/tmp/policy.json")
+    assert(!browserFull.contains("--dangerously-skip-permissions")
+           && browserFull.contains("mcp__playwright"),
+           "full access must not bypass the browser policy: \(browserFull)")
+    let setup = browserSetupCommand(userDataDir: "/tmp/browser profile")
+    assert(setup.contains("@playwright/mcp@0.0.79") && !setup.contains("@latest"),
+           "browser setup must use the reviewed Playwright MCP version: \(setup)")
     // The note must forbid the three things Debby must never do, in words the model reads.
     assert(browserNote.contains("NEED:"), "the note must define the gate marker")
     assert(browserNote.lowercased().contains("captcha"), "the note must forbid CAPTCHAs")

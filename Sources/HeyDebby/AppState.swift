@@ -728,8 +728,7 @@ final class AppState: ObservableObject {
     func enableBrowserControl() {
         let dir = Profile.url.deletingLastPathComponent()
             .appendingPathComponent("browser").path
-        let cmd = "claude mcp add playwright --scope user -- npx -y @playwright/mcp@latest "
-                + "--user-data-dir \(shellQuote(dir))"
+        let cmd = browserSetupCommand(userDataDir: dir)
         agentBusy = true
         agentLine = "🌐 setting up the browser…"
         Task {
@@ -745,14 +744,22 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Undoes `enableBrowserControl()`. Without this, switching the toggle off would only
-    /// stop attaching `browserNote` to future tasks (see `runAgent`) while the Playwright
-    /// server stayed registered and `mcp__playwright` stayed in every claude agent's
-    /// allowlist (unconditionally — see `agentCommand`'s comment) — the one guardrail
-    /// gone, the capability still fully callable. Fire-and-forget: `claude mcp remove` on
-    /// a server that was never added, or already removed, is a harmless no-op either way.
+    /// Per-run tool grants are the authorization boundary, but removing the user-scoped
+    /// registration keeps the user's other Claude sessions truthful when this is off.
     func disableBrowserControl() {
-        Task { _ = try? await shellOutput("claude mcp remove playwright --scope user") }
+        agentBusy = true
+        agentLine = "🌐 removing browser access…"
+        Task {
+            do {
+                _ = try await shellOutput("claude mcp remove playwright --scope user")
+                agentLine = "✅ browser access removed"
+            } catch {
+                UserDefaults.standard.set(true, forKey: "browserControl")
+                agentLine = "❌ \(error.localizedDescription)"
+            }
+            agentBusy = false
+            agentFade()
+        }
     }
 
     /// One agent run that reads the user's documents and prints JSON. It goes through

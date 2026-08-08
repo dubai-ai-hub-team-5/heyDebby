@@ -7,7 +7,8 @@ func shellQuote(_ s: String) -> String {
 /// Pure command builder (selfcheck-tested). backend: "codex" or "claude".
 func agentCommand(backend: String, task: String, screenshotPath: String?,
                   fullAccess: Bool, appControl: Bool = false,
-                  session: String? = nil, resume: Bool = false) -> String {
+                  session: String? = nil, resume: Bool = false,
+                  browser: Bool = false, settingsPath: String? = nil) -> String {
     if backend == "codex" {
         // `codex exec` has no session-resume equivalent, so session/resume are ignored here.
         var cmd = "codex exec --skip-git-repo-check"
@@ -24,7 +25,7 @@ func agentCommand(backend: String, task: String, screenshotPath: String?,
     // would force --output-format json and break the streaming ticker the notch relies on).
     var sessionFlag = ""
     if let s = session { sessionFlag = resume ? " -r \(shellQuote(s))" : " --session-id \(shellQuote(s))" }
-    if fullAccess {
+    if fullAccess && !browser {
         return "claude -p\(sessionFlag) --dangerously-skip-permissions \(shellQuote(prompt))"
     }
     // Without an allowlist `claude -p` denies every tool, so an app task fails silently.
@@ -34,13 +35,18 @@ func agentCommand(backend: String, task: String, screenshotPath: String?,
     // agent's osascript call runs raw, never through BeatSplitter's refusal list, so it
     // is only handed out when the user has app control switched on. Off by default in
     // Settings means off here too, not a second door that skips the toggle.
-    // mcp__playwright is granted unconditionally, the same way mcp__composio is: an
-    // allowed tool name nobody registered with the CLI is simply unusable, so listing it
-    // here costs nothing when the browser-control toggle has never been switched on. The
-    // real gate is `browserNote` below — see its comment.
-    var tools = "mcp__composio mcp__playwright Read Glob Grep"
+    var tools = "mcp__composio Read Glob Grep"
+    if browser { tools += " mcp__playwright" }
     if appControl { tools += " Bash(osascript:*)" }
-    return "claude -p\(sessionFlag) \(shellQuote(prompt)) --allowedTools \(tools)"
+    let settingsFlag = settingsPath.map { " --settings \(shellQuote($0))" } ?? ""
+    return "claude -p\(sessionFlag)\(settingsFlag) \(shellQuote(prompt)) --allowedTools \(tools)"
+}
+
+let playwrightMCPVersion = "0.0.79"
+
+func browserSetupCommand(userDataDir: String) -> String {
+    "claude mcp add playwright --scope user -- npx -y @playwright/mcp@\(playwrightMCPVersion) "
+        + "--user-data-dir \(shellQuote(userDataDir))"
 }
 
 // Both CLIs have the Composio MCP gateway registered (connect.composio.dev) —
@@ -119,11 +125,34 @@ enum AgentRunner {
     static func run(backend: String, task: String, screenshotPath: String?, fullAccess: Bool, appControl: Bool,
                     session: String? = nil, resume: Bool = false, browser: Bool = false,
                     onOutput: @escaping (String) -> Void, onDone: @escaping (Int32) -> Void) -> Process? {
-        let agent = agentCommand(backend: backend, task: task + composioNote + (browser ? browserNote : ""),
+        let effectiveBrowser = browser && backend == "claude"
+        var settingsURL: URL?
+        if effectiveBrowser {
+            do {
+                let executable = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
+                let data = try BrowserPolicy.settingsJSON(executablePath: executable)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("heydebby-browser-policy-\(UUID().uuidString).json")
+                try data.write(to: url, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                      ofItemAtPath: url.path)
+                settingsURL = url
+            } catch {
+                onOutput("Failed to create the browser safety policy: \(error.localizedDescription)")
+                onDone(-1)
+                return nil
+            }
+        }
+        let agent = agentCommand(backend: backend,
+                                 task: task + composioNote + (effectiveBrowser ? browserNote : ""),
                                  screenshotPath: screenshotPath, fullAccess: fullAccess, appControl: appControl,
-                                 session: session, resume: resume)
+                                 session: session, resume: resume, browser: effectiveBrowser,
+                                 settingsPath: settingsURL?.path)
         DebbyLog.write("AGENT (\(backend)) \(task)")
-        return spawn(cliPathPrefix + "exec \(agent)", onOutput: onOutput, onDone: onDone)
+        return spawn(cliPathPrefix + "exec \(agent)", onOutput: onOutput, onDone: { code in
+            if let settingsURL { try? FileManager.default.removeItem(at: settingsURL) }
+            onDone(code)
+        })
     }
 
     @discardableResult

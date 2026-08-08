@@ -945,9 +945,9 @@ struct SettingsView: View {
             ))
             .disabled(!Claude.CLI.isLoggedIn)
             if Claude.CLI.isLoggedIn {
-                Text("Debby fills forms in a real browser and stops for your OK before "
-                     + "anything is submitted. Registers a browser tool with the claude "
-                     + "CLI, so your other claude sessions can see it too.")
+                Text("Debby fills safe fields automatically. Passwords, payments and final "
+                     + "submissions stay in the visible browser for you. HeyDebby grants the "
+                     + "tool only while this is on; user-scoped Claude sessions can also see its registration.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 260, alignment: .leading)
             } else {
