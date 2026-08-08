@@ -84,12 +84,21 @@ struct AgentRailView: View {
                         if inside { state.railHover = run.id }
                         else if state.railHover == run.id { state.railHover = nil }
                     }
+                    // Slides in from off-screen right. A card that simply blinks into
+                    // existence in the corner of a busy screen is a card nobody notices —
+                    // the movement is what does the announcing.
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        // Top-trailing, not centred. Vertically centred put the first pill in the middle
+        // of whatever the user was reading, which is both in the way and — because nothing
+        // else on macOS lives there — the last place anyone thinks to look. Top right is
+        // where notifications appear, so it is where the eye already goes.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         .padding(.trailing, RailMetrics.margin)
+        .padding(.top, RailMetrics.margin)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.railHover)
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.agents.map(\.id))
+        .animation(.spring(response: 0.34, dampingFraction: 0.8), value: state.agents.map(\.id))
     }
 }
 
@@ -116,12 +125,28 @@ struct AgentCard: View {
                 buttons
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.leading, 15)   // clears the accent stripe below
+        .padding(.trailing, 11)
+        .padding(.vertical, 9)
         .frame(width: expanded ? RailMetrics.expanded : RailMetrics.collapsed, alignment: .leading)
-        .background(Color.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(tint.opacity(0.45), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.45), radius: 12, y: 4)
+        // A near-black card with a hairline border disappeared against a dark terminal —
+        // the first version of this was on screen and the user could not find it. Three
+        // things fix that without turning it into a billboard: a solid surface light
+        // enough to separate from black, a full-strength border in the status colour, and
+        // a halo of that same colour, which is what makes it read against a white document
+        // as well as a dark one. The status is then legible from across the screen without
+        // reading a word of it.
+        .background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12).strokeBorder(tint.opacity(0.85), lineWidth: 1)
+        )
+        .overlay(alignment: .leading) {
+            // Accent stripe down the leading edge: at pill size the icon is the only other
+            // colour, and one 3pt bar of it survives being glanced at.
+            Capsule().fill(tint).frame(width: 3).padding(.vertical, 8).padding(.leading, 1)
+        }
+        .shadow(color: tint.opacity(0.28), radius: 10)
+        .shadow(color: .black.opacity(0.55), radius: 14, y: 5)
     }
 
     private var header: some View {
@@ -132,7 +157,7 @@ struct AgentCard: View {
                 // output underneath. See `AgentRun.summary` for why the pill is not a
                 // progress line.
                 Text(expanded ? run.task : run.summary)
-                    .font(.system(size: 11, weight: expanded ? .semibold : .regular))
+                    .font(.system(size: 12, weight: expanded ? .semibold : .medium))
                     .foregroundStyle(.white)
                     .lineLimit(expanded ? 2 : 1)
                     .multilineTextAlignment(.leading)
