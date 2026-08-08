@@ -93,6 +93,24 @@ enum Profile {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
+    static func isValidStoredData(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let fields = object as? [String: Any], !fields.isEmpty else { return false }
+        return fields.allSatisfy { name, rawField in
+            guard validFieldName(name), let field = rawField as? [String: Any],
+                  Set(field.keys) == ["value", "source"],
+                  let value = field["value"] as? String, !value.isEmpty,
+                  let source = field["source"] as? String, source.hasPrefix("/")
+            else { return false }
+            return true
+        }
+    }
+
+    static var validStoredProfileURL: URL? {
+        guard let data = try? Data(contentsOf: url), isValidStoredData(data) else { return nil }
+        return url
+    }
+
     static func deletePrivateData(profileURL: URL = url, logURL: URL = DebbyLog.url) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: profileURL.path) { try fm.removeItem(at: profileURL) }

@@ -93,7 +93,8 @@ enum BrowserPolicy {
 
         case "browser_type":
             guard validTarget(input), safeLabel(input["element"]),
-                  input["text"] is String, (input["submit"] as? Bool) != true,
+                  let text = input["text"] as? String, safeValue(text),
+                  (input["submit"] as? Bool) != true,
                   input["slowly"] == nil || input["slowly"] is Bool else {
                 return deny("Sensitive or submitting input must be completed by the user")
             }
@@ -194,7 +195,24 @@ enum BrowserPolicy {
               let type = field["type"] as? String,
               ["textbox", "checkbox", "radio", "combobox", "slider"].contains(type),
               let ref = field["ref"] as? String, !ref.isEmpty,
-              field["value"] is String else { return false }
+              let value = field["value"] as? String, safeValue(value) else { return false }
         return true
+    }
+
+    private static func safeValue(_ value: String) -> Bool {
+        let digits = value.filter(\.isNumber)
+        guard (13...19).contains(digits.count),
+              value.allSatisfy({ $0.isNumber || $0 == " " || $0 == "-" })
+        else { return true }
+        var sum = 0
+        for (offset, character) in digits.reversed().enumerated() {
+            guard var digit = character.wholeNumberValue else { return false }
+            if offset % 2 == 1 {
+                digit *= 2
+                if digit > 9 { digit -= 9 }
+            }
+            sum += digit
+        }
+        return sum % 10 != 0
     }
 }

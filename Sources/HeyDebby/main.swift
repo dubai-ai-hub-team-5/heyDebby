@@ -435,13 +435,19 @@ func runSelfCheck() {
     let setup = browserSetupCommand(userDataDir: "/tmp/browser profile")
     assert(setup.contains("@playwright/mcp@0.0.79") && !setup.contains("@latest"),
            "browser setup must use the reviewed Playwright MCP version: \(setup)")
-    // The note must forbid the three things Debby must never do, in words the model reads.
-    assert(browserNote.contains("NEED:"), "the note must define the gate marker")
-    assert(browserNote.lowercased().contains("captcha"), "the note must forbid CAPTCHAs")
-    assert(browserNote.contains(Profile.url.path),
+    // Browser denial is a terminal handoff, not a question that can resume the action.
+    let validBrowserNote = browserGuidance(profileURL: Profile.url)
+    assert(!validBrowserNote.contains("NEED:"),
+           "browser safety must not offer a resume path for a denied action")
+    assert(validBrowserNote.lowercased().contains("leave the browser open"),
+           "the agent must hand denied work to the visible browser")
+    assert(validBrowserNote.lowercased().contains("captcha"), "the note must forbid CAPTCHAs")
+    assert(validBrowserNote.contains(Profile.url.path),
            "the note carries the profile PATH, never its contents — argv is world-readable")
-    assert(!browserNote.contains("passport") && !browserNote.contains("K1234567"),
+    assert(!validBrowserNote.contains("passport") && !validBrowserNote.contains("K1234567"),
            "the note must never carry an example of an actual profile value")
+    assert(!browserGuidance(profileURL: nil).contains(Profile.url.path),
+           "an invalid or missing profile path must not be offered to the agent")
 
     // --- browser policy: the prompt is guidance; this is the executable boundary ---
     assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_snapshot", input: [:]) == .allow,
@@ -458,6 +464,9 @@ func runSelfCheck() {
     assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_fill_form", input: [
         "fields": [["name": "Password", "type": "textbox", "ref": "e13", "value": "secret"]]
     ]).isDenied, "password fields must never be filled")
+    assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_fill_form", input: [
+        "fields": [["name": "Number", "type": "textbox", "ref": "e14", "value": "4111111111111111"]]
+    ]).isDenied, "card numbers must be denied even when the field label is vague")
     assert(BrowserPolicy.evaluate(toolName: "mcp__playwright__browser_evaluate",
                                   input: ["function": "() => document.cookie"]).isDenied,
            "arbitrary page JavaScript must never execute")
@@ -710,6 +719,9 @@ func runSelfCheck() {
     let decodedProfile = try! JSONDecoder().decode([String: ProfileField].self, from: validProfileData)
     assert(decodedProfile["full_name"] == ProfileField(value: "Debby User", source: sourceFile.path),
            "valid in-root profile must be typed and re-encoded")
+    assert(Profile.isValidStoredData(validProfileData), "new typed profiles must be readable")
+    assert(!Profile.isValidStoredData(Data("{\"full_name\":\"legacy scalar\"}".utf8)),
+           "legacy syntax-only profiles must not be offered to a browser agent")
 
     func profileRejected(_ raw: String) -> Bool {
         do { _ = try Profile.validateAndEncode(raw, allowedRoots: [allowedRoot]); return false }

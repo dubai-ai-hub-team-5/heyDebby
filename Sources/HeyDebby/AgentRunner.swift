@@ -53,34 +53,28 @@ If an app isn't connected yet, use COMPOSIO_MANAGE_CONNECTIONS and print the con
 so the user can authorize it in their browser.)
 """
 
-/// Appended to every agent task while browser control is on. No per-task classification:
-/// a note costs less than code that guesses which tasks are form tasks.
-///
-/// The profile PATH is passed, never its contents — a passport number on a command line
-/// is visible to every process on the machine via `ps`.
-///
-/// This is the ONLY thing standing between the agent and clicking Submit on a real form —
-/// mcp__playwright sits in `agentCommand`'s allowlist unconditionally (see its comment),
-/// so once the Playwright server is registered, whether Debby actually READS this note is
-/// the entire safety boundary. That is also why `AppState.disableBrowserControl()`
-/// unregisters the server when the toggle goes off: without that, turning browser control
-/// "off" would silently stop attaching this note to future tasks while leaving the browser
-/// tool itself fully callable — the one guardrail gone, the capability still live.
-let browserNote = """
+/// Guidance appended while browser control is on. The executable boundary is
+/// `BrowserPolicy`; this text explains how the agent should respond to a denial.
+/// The profile path is included only after its stored structure validates, and profile
+/// contents never appear on the command line.
+func browserGuidance(profileURL: URL?) -> String {
+    let profile: String
+    if let profileURL {
+        profile = "The user's validated details are in \(profileURL.path); read that file when an ordinary form field asks for them."
+    } else {
+        profile = "No validated profile is available. Do not invent missing personal details."
+    }
+    return """
 
-(You can drive a real browser with the Playwright tools. The user's own details — name, \
-date of birth, ID numbers, address — are in \(Profile.url.path); read that file when a \
-form asks for them, and say so if it is missing or lacks the field you need.
+    (You can drive a real browser with the Playwright tools. \(profile)
 
-Leave the browser window open so the user can watch and take over.
+    Leave the browser open so the user can watch and take over. Never type a password, card \
+    number, one-time code, or CAPTCHA response. The browser policy enforces the final boundary.
 
-NEVER type a password, a card number, or a one-time code. NEVER attempt a CAPTCHA. NEVER \
-click Submit, Pay, Confirm, or anything else that cannot be undone.
-
-When you reach any of those, or the form's own review page, print exactly one line:
-NEED: <one sentence saying what you need or what is about to happen>
-then stop and do nothing further. The user answers, and you will be resumed.)
-"""
+    If a browser operation is denied, stop immediately and leave the browser open for the user \
+    to complete that action directly. Do not ask to resume or retry the denied operation.)
+    """
+}
 
 /// The login shell an app-launched CLI gets: `-l` sources .zprofile but NOT .zshrc,
 /// so anything a user set up interactively (nvm etc.) is absent — hence the explicit PATH.
@@ -143,7 +137,8 @@ enum AgentRunner {
             }
         }
         let agent = agentCommand(backend: backend,
-                                 task: task + composioNote + (effectiveBrowser ? browserNote : ""),
+                                 task: task + composioNote
+                                    + (effectiveBrowser ? browserGuidance(profileURL: Profile.validStoredProfileURL) : ""),
                                  screenshotPath: screenshotPath, fullAccess: fullAccess, appControl: appControl,
                                  session: session, resume: resume, browser: effectiveBrowser,
                                  settingsPath: settingsURL?.path)

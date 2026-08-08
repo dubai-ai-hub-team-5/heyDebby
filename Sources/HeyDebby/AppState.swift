@@ -881,9 +881,8 @@ final class AppState: ObservableObject {
         runAgent("Confirmed — proceed.", resumeSession: g.session)
     }
 
-    /// Cancel — the session is abandoned. Terminates the process if it's still running
-    /// (normally a no-op — the gate usually opens only after the agent has already
-    /// exited). The browser window stays open; the user takes over.
+    /// Cancel — the generic question session is abandoned. Terminates the process if it
+    /// is still running (normally a no-op because the gate opens after agent exit).
     func cancelNeed() {
         closeGate()
     }

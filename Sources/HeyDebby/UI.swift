@@ -525,10 +525,8 @@ struct NotchView: View {
 
             HStack(spacing: 14) {
                 if state.pendingNeed != nil && !state.agentBusy {
-                    // The agent stopped before something irreversible and is waiting —
-                    // "I did it" means something else here, so this gets its own labels.
-                    // !agentBusy matches the sibling branch below: don't offer Confirm
-                    // until the run is actually done, not just until it printed the line.
+                    // A generic agent can pause for missing information. Browser-policy
+                    // denials never use this resume path.
                     Button { state.confirmNeed() } label: {
                         Label("Confirm", systemImage: "checkmark.circle.fill")
                             .font(.system(size: 11, weight: .semibold))
@@ -544,7 +542,7 @@ struct NotchView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .tint(.red)
-                    .help("Abandon the agent's paused session — the browser stays open")
+                    .help("Abandon the agent's paused session")
                 } else if state.showNext && !state.isThinking && !state.isListening {
                     Button { state.submit("Done — what's the next step?") } label: {
                         Label("I did it", systemImage: "checkmark.circle.fill")
