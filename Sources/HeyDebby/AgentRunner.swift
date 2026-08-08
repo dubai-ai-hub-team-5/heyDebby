@@ -28,12 +28,21 @@ func agentCommand(backend: String, task: String, screenshotPath: String?,
     if fullAccess && !browser {
         return "claude -p\(sessionFlag) --dangerously-skip-permissions \(shellQuote(prompt))"
     }
+    // The allowlist below only means "read-only" if nothing else widens it, and something
+    // else routinely does: `--allowedTools` adds to the user's own ~/.claude/settings.json
+    // rather than replacing it, so a `permissions.defaultMode` of `auto` (or acceptEdits,
+    // or bypassPermissions) there silently grants every agent Write and Bash. Verified on
+    // a machine with `auto` set: an agent told to write a file wrote it, allowlist and all.
+    // Debby's own posture must not depend on how the user configured a different tool, in
+    // either direction — so it is pinned here. `manual` is the ask-for-everything mode,
+    // which in `-p` (nobody to ask) means deny, while allowlisted tools still run.
+    let pin = " --permission-mode manual"
     // Without an allowlist `claude -p` denies every tool, so an app task fails silently.
     // --allowedTools is variadic: it must be last, and the prompt must precede it.
     var tools = "mcp__composio Read Glob Grep"
     if browser { tools += " mcp__playwright" }
     let settingsFlag = settingsPath.map { " --settings \(shellQuote($0))" } ?? ""
-    return "claude -p\(sessionFlag)\(settingsFlag) \(shellQuote(prompt)) --allowedTools \(tools)"
+    return "claude -p\(sessionFlag)\(pin)\(settingsFlag) \(shellQuote(prompt)) --allowedTools \(tools)"
 }
 
 let playwrightMCPVersion = "0.0.79"
@@ -65,7 +74,6 @@ func browserGuidance(profileURL: URL?) -> String {
         profile = "No validated profile is available. Do not invent missing personal details."
     }
     return """
-
     (You can drive a real browser with the Playwright tools. \(profile)
 
     Leave the browser open so the user can watch and take over. Never type a password, card \
@@ -74,6 +82,111 @@ func browserGuidance(profileURL: URL?) -> String {
     If a browser operation is denied, stop immediately and leave the browser open for the user \
     to complete that action directly. Do not ask to resume or retry the denied operation.)
     """
+}
+
+/// Appended while full access is on — the only mode in which an agent can finish a job
+/// rather than just describe one, since every other mode denies Write and Bash.
+///
+/// The capability being described is command execution, so the note describes exactly
+/// that and nothing narrower. An earlier draft explained how to build a spreadsheet, and
+/// a note that explains one task is a note that teaches the agent which task it is for:
+/// the formats named below are examples of a general power, not a menu of what Debby
+/// supports. Anything a command can do is in scope.
+///
+/// What it does pin down is the handful of choices every run would otherwise re-decide,
+/// each of which has one clearly better answer:
+///
+/// - Where output goes, so ten runs don't invent ten locations.
+/// - How to get a tool that isn't installed. `uv run --with` / `uvx` fetch per-run and
+///   leave nothing behind, which beats an agent running `brew install` on someone's Mac.
+/// - Files, never AppleScript, for producing a document: writing an .xlsx needs no
+///   Automation grant, works with Excel closed, and cannot clobber unsaved edits in a
+///   workbook the user has open. Driving apps is the interactive `RUN:` rail's job.
+/// - Verify before reporting, because an agent that cannot see the notch has no other way
+///   to notice it produced nothing.
+///
+/// The workspace is a convention and this note is the whole of its enforcement — see
+/// `Workspace`. Nothing here restrains a full-access agent, and nothing here is pretending
+/// to; the setting's own warning is the boundary.
+let workNote = """
+
+(You can run any command on this Mac and create or change any file of any kind. Treat the \
+request as a job to finish end to end — there is no fixed list of things you support, so \
+work out what it needs, run it, and check the result. Writing a Python script and running \
+it is usually the shortest route; keep the script beside its output so the user can re-run \
+or adjust it. Put whatever you make in \(Workspace.path) unless the user asked for \
+somewhere specific — the folder already exists.
+
+Nothing needs to be preinstalled: `uvx <tool>` runs a command-line tool and \
+`uv run --with <package> python script.py` runs a script against any Python library, \
+neither installing anything permanently — openpyxl for Excel, python-pptx for PowerPoint, \
+python-docx for Word, pypdf or reportlab for PDFs, pandas for data, pillow for images, and \
+whatever else the job actually needs. If uv is missing, fall back to \
+`python3 -m pip install --user <package>` or to what the Mac already has (sips, textutil, \
+sqlite3, qlmanage).
+
+Produce the real format rather than something that resembles it — a genuine .xlsx with \
+working formulas, a real .pptx, not a renamed .csv or a text file with the wrong \
+extension. Do NOT remote-control a GUI app (Excel, PowerPoint, Word, Numbers, Keynote, \
+Pages) through AppleScript to build a file: it needs an Automation grant this run does not \
+have, it fails when the app is closed, and it can destroy unsaved work.
+
+Before reporting the job done, verify it — open the file back up in the same library, \
+re-run the command, check the output really is what was asked for — and say plainly if it \
+isn't. Then run `open` on what you made so the user sees it, and print its full path on \
+its own line.)
+"""
+
+/// Appended when full access is off, which is the default. The grant is Read/Glob/Grep
+/// plus the MCP gateways, so an agent asked to make a spreadsheet cannot make one — and
+/// `claude -p` discovers that mid-run, several minutes in, with no way to ask.
+///
+/// Without this note the notch shows the ticker scrolling and then "✅ agent done" over a
+/// job that never happened, which is the worst of the three possible outcomes. With it the
+/// agent names the switch to flip. That is the whole fix: the capability is not widened
+/// here, only the silence.
+///
+/// Worded around *changing things* rather than around denied tools, because the two
+/// backends deny different ones: claude has no Bash at all here, while `codex exec
+/// -s read-only` will happily run a command that only reads. Both are "can look, cannot
+/// touch", and that is the only claim this makes.
+let readOnlyNote = """
+
+(You can read files and use the user's connected apps, but you cannot change anything on \
+this Mac — writing or deleting a file, installing anything, changing a setting — and this \
+run is unattended, so nothing can be approved mid-way. If the task needs any of that, do \
+whatever part you can, then say in one line that the rest needs "Agents: full access" \
+switched on in Debby's settings. Never claim to have done something you were not able to do.)
+"""
+
+/// Browser-enabled runs stay on a scoped allowlist even when the global full-access
+/// setting is on. This keeps the executable browser policy in force and avoids telling
+/// the agent either that it has a shell or that the user should toggle a setting that is
+/// already enabled.
+let browserModeNote = """
+
+(This run can read files, use connected apps, and drive the browser through the Playwright \
+tools, but it cannot run arbitrary commands or change local files. Complete the browser task \
+within those capabilities and never claim to have performed a local change you could not make.)
+"""
+
+/// Appended to every agent task while browser control is on. No per-task classification:
+/// a note costs less than code that guesses which tasks are form tasks.
+///
+/// The profile PATH is passed, never its contents — a passport number on a command line
+/// is visible to every process on the machine via `ps`.
+///
+/// Playwright is granted only for browser-enabled runs, and BrowserPolicy remains the
+/// executable safety boundary. This note tells the agent how to hand control back when
+/// that policy refuses a sensitive or final action.
+func agentPrompt(task: String, fullAccess: Bool, browser: Bool,
+                 profileURL: URL? = nil) -> String {
+    // Browser runs deliberately never use the full-access CLI branch: doing so would
+    // bypass the per-tool policy. Keep the capability note honest about that narrower
+    // execution mode even when the global full-access toggle is on.
+    let capability = browser ? browserModeNote : (fullAccess ? workNote : readOnlyNote)
+    return task + composioNote + capability
+        + (browser ? browserGuidance(profileURL: profileURL) : "")
 }
 
 /// The login shell an app-launched CLI gets: `-l` sources .zprofile but NOT .zshrc,
@@ -137,8 +250,9 @@ enum AgentRunner {
             }
         }
         let agent = agentCommand(backend: backend,
-                                 task: task + composioNote
-                                    + (effectiveBrowser ? browserGuidance(profileURL: Profile.validStoredProfileURL) : ""),
+                                 task: agentPrompt(task: task, fullAccess: fullAccess,
+                                                   browser: effectiveBrowser,
+                                                   profileURL: Profile.validStoredProfileURL),
                                  screenshotPath: screenshotPath, fullAccess: fullAccess, appControl: appControl,
                                  session: session, resume: resume, browser: effectiveBrowser,
                                  settingsPath: settingsURL?.path)

@@ -370,6 +370,86 @@ func runSelfCheck() {
            "log directory/file permissions must be 0700/0600, got \(String(describing: privateDirMode))/\(String(describing: privateFileMode))")
     try? FileManager.default.removeItem(at: privateRoot)
 
+    // --- the read-only grant is pinned, not inherited ---
+    // --allowedTools ADDS to the user's ~/.claude/settings.json rather than replacing it,
+    // so a `permissions.defaultMode` of auto/acceptEdits/bypassPermissions there hands
+    // every "read-only" agent Write and Bash. Observed, not theorised: on a machine with
+    // `auto` set, an agent carrying exactly this allowlist wrote the file it was asked
+    // for. The pin is what makes the README's "read-mostly by default" true off this Mac.
+    let pinned = agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: false)
+    assert(pinned.contains("--permission-mode manual"),
+           "a non-full-access agent must pin its own posture: \(pinned)")
+    assert(pinned.range(of: "--permission-mode")!.upperBound <= pinned.range(of: "'hi'")!.lowerBound,
+           "flags come before the prompt; --allowedTools is the only thing after it")
+    // Passing both would be contradictory, and the CLI is entitled to reject the pair.
+    assert(!agentCommand(backend: "claude", task: "hi", screenshotPath: nil, fullAccess: true)
+            .contains("--permission-mode"), "full access is already explicit — no second mode flag")
+    // codex names its sandbox on the command line either way, so it has nothing to inherit.
+    assert(!agentCommand(backend: "codex", task: "hi", screenshotPath: nil, fullAccess: false)
+            .contains("--permission-mode"), "codex takes no claude flags")
+
+    // --- doing the job: which capability note the agent is told ---
+    // Exactly one of the two, never both: they contradict each other outright, and an
+    // agent told both "you can create files" and "you cannot change anything" resolves it
+    // by guessing.
+    let jobPrompt = agentPrompt(task: "make me a spreadsheet of my expenses",
+                                fullAccess: true, browser: false)
+    assert(jobPrompt.contains(Workspace.path), "a working agent must be told where output goes")
+    assert(jobPrompt.contains("openpyxl"), "spreadsheets are files, and the note must say how")
+    assert(!jobPrompt.contains("full access"), "already on; nothing to ask the user to switch on")
+    let roPrompt = agentPrompt(task: "make me a spreadsheet of my expenses",
+                               fullAccess: false, browser: false)
+    assert(roPrompt.contains("Agents: full access"),
+           "a blocked agent must name the setting, or the run reports success over nothing")
+    assert(!roPrompt.contains(Workspace.path) && !roPrompt.contains("openpyxl"),
+           "an agent that cannot write must not be told where to write: \(roPrompt)")
+    // Both carry Composio: connected apps work in either mode, since a remote app write
+    // is not a local one. Browser stays independent of the pair.
+    assert(jobPrompt.contains("COMPOSIO_SEARCH_TOOLS") && roPrompt.contains("COMPOSIO_SEARCH_TOOLS"),
+           "connected apps are not gated on full access")
+    let browserPrompt = agentPrompt(task: "book a slot", fullAccess: false, browser: true,
+                                    profileURL: URL(fileURLWithPath: "/tmp/profile.json"))
+    assert(browserPrompt.contains("/tmp/profile.json"),
+           "browser control must include the validated profile path")
+    assert(!browserPrompt.contains("NEED:"),
+           "browser-policy denials are a user handoff, never a resumable agent gate")
+    assert(browserPrompt.contains("Do not ask to resume"),
+           "a denied browser action must stop instead of creating an unsafe retry path")
+    let fullBrowserPrompt = agentPrompt(task: "book a slot", fullAccess: true, browser: true)
+    assert(fullBrowserPrompt.contains("cannot run arbitrary commands")
+           && !fullBrowserPrompt.contains(Workspace.path)
+           && !fullBrowserPrompt.contains("Agents: full access"),
+           "browser policy narrows even a full-access run, so its prompt must not promise a shell")
+    // The grant is command execution, so the note must read as a general capability. This
+    // is a real regression this code already had once: the first draft explained how to
+    // build a spreadsheet and nothing else, which does not describe a shell — it teaches
+    // the agent that spreadsheets are the job Debby does. The formats below are examples,
+    // and the test exists to keep them examples.
+    assert(jobPrompt.contains("any command"),
+           "the capability is the shell, not a task list: \(workNote)")
+    assert(jobPrompt.contains("no fixed list"),
+           "an agent must not infer the supported tasks from the ones named here")
+    for pkg in ["openpyxl", "python-pptx", "python-docx", "pypdf", "pandas", "pillow"] {
+        assert(workNote.contains(pkg),
+               "\(pkg) missing — spreadsheets must read as one example among many, not the feature")
+    }
+    // Writing a script and running it is the general shape of "do a job with a command",
+    // and leaving it behind turns a one-off run into something the user can run again.
+    assert(workNote.contains("Python script") && workNote.contains("re-run"),
+           "the route to any format is a script the user keeps, not a built-in per app")
+    // One mechanism for every tool, so a task needing something unusual is not a dead end.
+    // Per-run rather than installed: an agent that `brew install`s on someone's Mac to
+    // finish a five-minute job leaves the machine changed in a way nobody asked for.
+    assert(workNote.contains("uv run --with") && workNote.contains("uvx"),
+           "the note must say how to get ANY library or CLI tool, not assume one is present")
+    // The file route, not the app route: AppleScript against Excel needs an Automation
+    // grant the agent path never asks for, breaks with the app closed, and can clobber
+    // unsaved edits in an open workbook. Driving apps is the interactive RUN: rail's job.
+    assert(!workNote.lowercased().contains("applescript") || workNote.contains("Do NOT remote-control"),
+           "documents are built by writing files, never by driving the app: \(workNote)")
+    // An unattended agent has no user watching the notch to catch an empty result.
+    assert(workNote.contains("verify"), "a job reported without checking is a job reported blind")
+
     // --- agent session id / resume ---
     let uuid = "0F8E4B10-3C2A-4D5E-9F01-2A3B4C5D6E7F"
     let first = agentCommand(backend: "claude", task: "renew my passport",
@@ -635,75 +715,103 @@ func runSelfCheck() {
     assert(crSplit.feed("\n") == nil, "the paired \\n arriving after must not fire a second time")
 
     // --- agentOutcome: the pure decision onDone makes, testable with no scanner/process ---
-    let doneOK = agentOutcome(exitCode: 0, need: nil)
-    assert(doneOK.line == "✅ agent done" && doneOK.fades, "a clean exit with no question fades")
-    let doneErr = agentOutcome(exitCode: 2, need: nil)
-    assert(doneErr.line == "❌ agent exited (2)" && doneErr.fades, "a nonzero exit with no question fades")
-    let gated = agentOutcome(exitCode: 0, need: "q")
-    assert(gated.line == "❓ q" && !gated.fades, "a question must not fade — it waits for Confirm/Cancel")
-    let gatedNonzero = agentOutcome(exitCode: 1, need: "q")
-    assert(gatedNonzero.line == "❓ q" && !gatedNonzero.fades,
+    assert(agentOutcome(exitCode: 0, need: nil) == .done, "a clean exit with no question is done")
+    assert(agentOutcome(exitCode: 2, need: nil) == .failed(2), "a nonzero exit carries its code")
+    assert(agentOutcome(exitCode: 0, need: "q") == .asking("q"),
+           "a paused agent exits 0 — reporting that as done would claim a half-finished job succeeded")
+    assert(agentOutcome(exitCode: 1, need: "q") == .asking("q"),
            "a NEED: seen right before a nonzero exit still shows the question, not the error")
 
-    // A gate nobody can see is a hang: a pending question must keep the notch open, and
-    // Cancel must be able to clear it without ever touching AgentRunner (no CLI spawn
-    // here) — feedGate/finishGate are exercised directly, with synthetic chunks, so this
-    // is the real agentTick/onDone call sites under test, not a reimplementation of them.
+    // --- OutputTail: whole lines out of arbitrary pipe chunks ---
+    // The notch could take "the newest line in this chunk" and drop the rest. A card
+    // showing a tail cannot, so lines split across chunk boundaries have to be rejoined —
+    // exactly the hazard NeedScanner exists for, on the display path this time.
+    var tail = OutputTail(cap: 3)
+    tail.feed("one\ntw")
+    assert(tail.lines == ["one"], "a half-line must wait for its newline: \(tail.lines)")
+    tail.feed("o\nthree\n")
+    assert(tail.lines == ["one", "two", "three"], "the split line must be rejoined: \(tail.lines)")
+    tail.feed("four\n")
+    assert(tail.lines == ["two", "three", "four"], "the cap drops the oldest, not the newest")
+    tail.feed("\r\n   \n")
+    assert(tail.lines == ["two", "three", "four"], "blank and whitespace-only lines are not output")
+    tail.feed("last, no newline")
+    assert(tail.newest == "four", "an unterminated line is not shown until flush")
+    tail.flush()
+    assert(tail.newest == "last, no newline",
+           "flush must surface the final line — it is the one carrying the result")
+
+    // --- one card per run: no shared slot left to cross-wire ---
+    // The regression this replaces: a single `gate` meant a second agent's question
+    // overwrote the first's, and Confirm then resumed whichever session was in the box.
     MainActor.assumeIsolated {
-        let gateState = AppState()
-        assert(!gateState.notchExpanded, "an idle notch has nothing to show")
-        var scanner = NeedScanner()
-        gateState.feedGate("NEED: does the gate work?\n", into: &scanner, session: "T", process: nil)
-        assert(gateState.pendingNeed == "does the gate work?", "feedGate must open the gate on a complete line")
-        assert(gateState.notchExpanded, "a pending NEED: must keep the notch open")
-        gateState.cancelNeed()
-        assert(gateState.pendingNeed == nil, "Cancel must clear the question")
-        assert(!gateState.notchExpanded, "clearing the only reason to be open must close it")
+        let a = AgentRun(task: "A's job", session: "SESSION-A")
+        let b = AgentRun(task: "B's job", session: "SESSION-B")
+        a.absorb("NEED: A's question\n")
+        b.absorb("NEED: B's question\n")
+        assert(a.status == .asking("A's question") && a.session == "SESSION-A",
+               "each run keeps its own question and the session that asked it")
+        assert(b.status == .asking("B's question") && b.session == "SESSION-B",
+               "a second run must not disturb the first")
     }
 
-    // The agent's last line usually has no trailing newline — feedGate alone must not
-    // catch it; only finishGate's flush does, at exit.
+    // A NEED: only counts once its line is complete; the agent's last line usually has no
+    // trailing newline, so `finish` has to flush or the gate silently never opens.
     MainActor.assumeIsolated {
-        let gateState = AppState()
-        var scanner = NeedScanner()
-        gateState.feedGate("NEED: no trailing newline", into: &scanner, session: "T", process: nil)
-        assert(gateState.pendingNeed == nil, "an incomplete line must not open the gate yet")
-        let outcome = gateState.finishGate(flushing: &scanner, session: "T", exitCode: 0)
-        assert(gateState.pendingNeed == "no trailing newline", "finishGate's flush must catch the unterminated last line")
-        assert(outcome.line == "❓ no trailing newline" && !outcome.fades, "finishGate must report the same gated outcome")
+        let run = AgentRun(task: "t", session: "S")
+        run.absorb("NEED: no trailing newline")
+        assert(run.status == .running, "an incomplete line must not open the gate yet")
+        run.finish(exitCode: 0)
+        assert(run.status == .asking("no trailing newline"),
+               "the flush at exit must catch the unterminated last line")
     }
 
-    // Critical regression: the question and the session Confirm resumes must always be
-    // the SAME atomic value. A second run's gate must never leave the first run's
-    // question paired with the second run's session (or vice versa) — there is no
-    // separate `needSession`-style slot left to desync from `pendingNeed` at all.
+    // Exit code 0 on a run that already asked means "paused as instructed", not "done" —
+    // the card must keep its Confirm rather than flipping to a green tick.
     MainActor.assumeIsolated {
-        let gateState = AppState()
-        var scannerA = NeedScanner()
-        var scannerB = NeedScanner()
-        gateState.feedGate("NEED: A's question\n", into: &scannerA, session: "SESSION-A", process: nil)
-        assert(gateState.gate?.session == "SESSION-A" && gateState.pendingNeed == "A's question")
-        gateState.feedGate("NEED: B's question\n", into: &scannerB, session: "SESSION-B", process: nil)
-        assert(gateState.pendingNeed == "B's question" && gateState.gate?.session == "SESSION-B",
-               "the question on screen and the session Confirm would resume must always travel together")
+        let run = AgentRun(task: "t", session: "S")
+        run.absorb("NEED: may I submit?\n")
+        run.finish(exitCode: 0)
+        assert(run.status == .asking("may I submit?"), "a gated run stays gated through its own exit")
+        assert(!run.isFinished, "a run waiting on the user is not finished")
     }
 
-    // Cancel must actually stop a still-running gate process, not just forget about it —
-    // a paused agent has usually already exited by the time onDone opens a gate, but a
-    // gate opened mid-stream (feedGate, before exit is confirmed) can still be live.
+    // --- the notch is talk-only now ---
+    // Agents held it open for as long as they ran, which put the mic — the one control
+    // anybody reaches for — inside a panel busy reporting something else.
     MainActor.assumeIsolated {
-        let gateState = AppState()
+        let s = AppState()
+        assert(!s.notchExpanded, "an idle notch has nothing to show")
+        s.agents.append(AgentRun(task: "long job", session: "S"))
+        assert(!s.notchExpanded, "a running agent must not hold the notch open")
+        s.agents[0].absorb("NEED: something?\n")
+        assert(!s.notchExpanded, "not even a question: it has a card, with its own Confirm")
+        s.isListening = true
+        assert(s.notchExpanded, "talking still opens it")
+    }
+
+    // Ending the conversation must not kill background work. Both ✕ and Start over used
+    // to terminate agents, which meant you could not say a single word to Debby without
+    // destroying a job that was halfway through writing a file.
+    MainActor.assumeIsolated {
+        let s = AppState()
         let sleepy = Process()
         sleepy.executableURL = URL(fileURLWithPath: "/bin/sleep")
         sleepy.arguments = ["30"]
         try! sleepy.run()
-        assert(sleepy.isRunning, "the process must actually be running before this test means anything")
-        var scanner = NeedScanner()
-        gateState.feedGate("NEED: still running\n", into: &scanner, session: "C", process: sleepy)
-        gateState.cancelNeed()
-        // terminate() delivers SIGTERM; the kernel takes a moment to land it.
-        for _ in 0..<100 where sleepy.isRunning { usleep(20_000) }
-        assert(!sleepy.isRunning, "Cancel must terminate a gate's still-running process, not just forget it")
+        let run = AgentRun(task: "keeps going", session: "S")
+        run.process = sleepy
+        s.agents.append(run)
+        s.dismiss()
+        s.newChat()
+        s.submit("what is on my screen")
+        assert(s.agents.count == 1 && sleepy.isRunning,
+               "✕, Start over and a new turn all leave running agents alone")
+        // Stop, though, must actually reach the process — not just forget about it.
+        s.stop(run)
+        for _ in 0..<100 where sleepy.isRunning { usleep(20_000) }   // SIGTERM takes a moment
+        assert(!sleepy.isRunning, "Stop must terminate the agent, not just drop the reference")
+        assert(run.status == .stopped, "and the card must say so")
     }
 
     // --- Profile: strict schema and source provenance ---
@@ -768,6 +876,53 @@ func runSelfCheck() {
            "privacy deletion must remove both profile and diagnostic log")
     try! Profile.deletePrivateData(profileURL: disposableProfile, logURL: disposableLog)
     try? FileManager.default.removeItem(at: profileRoot)
+
+    // --- rail geometry: the window is wide, the mouse trap is not ---
+    // The panel is always full expanded width so a card can grow leftward without being
+    // clipped. If that whole width caught clicks it would black-hole a 380pt column of
+    // whatever is underneath, so only the drawn cards' width is live.
+    let vis = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let idleHit = railHitRect(visible: vis, expanded: false)
+    let openHit = railHitRect(visible: vis, expanded: true)
+    assert(idleHit.maxX == vis.maxX && openHit.maxX == vis.maxX, "the rail is anchored to the right edge")
+    assert(idleHit.width < openHit.width, "hovering widens the trap to cover the expanded card")
+    assert(idleHit.width < RailMetrics.expanded,
+           "an un-hovered rail must not swallow clicks across the expanded width")
+    assert(idleHit.height == vis.height && idleHit.minY == vis.minY, "cards can sit anywhere down the edge")
+    // Without the widening, moving onto the part of the card that just appeared would
+    // leave the trap, collapse the card, and re-enter it — a flicker loop, not a hover.
+    let grownEdge = openHit.minX + RailMetrics.margin
+    assert(grownEdge < idleHit.minX, "the expanded card's new area must be inside the widened trap")
+
+    // --- which cards expire ---
+    // A failure keeps its card: the exit code and last lines are the whole diagnosis, and
+    // one that deletes itself twelve seconds later guarantees nobody reads it.
+    assert(railTTL(for: .done) != nil && railTTL(for: .stopped) != nil, "finished cards tidy themselves away")
+    assert(railTTL(for: .failed(1)) == nil, "a failure waits to be read and dismissed")
+    assert(railTTL(for: .running) == nil && railTTL(for: .asking("q")) == nil,
+           "a live or waiting card never expires out from under the user")
+
+    // --- Warmup: warm the host the next request actually goes to ---
+    // Each brain's host is asserted against the URL its own file builds, so renaming an
+    // endpoint without updating the warmup shows up here rather than as a silent no-op
+    // that warms a host nobody calls.
+    assert(Warmup.hosts(brain: "claude", voiceSource: "") == ["https://api.anthropic.com"],
+           "claude warms Anthropic: \(Warmup.hosts(brain: "claude", voiceSource: ""))")
+    assert(Warmup.hosts(brain: "openai", voiceSource: "") == ["https://api.openai.com"],
+           "openai warms OpenAI")
+    assert(Warmup.hosts(brain: "codex", voiceSource: "") == ["https://chatgpt.com"],
+           "codex posts to chatgpt.com, not api.openai.com")
+    assert(Warmup.hosts(brain: "gemini", voiceSource: "")
+           == ["https://generativelanguage.googleapis.com"], "gemini warms its own host")
+    // The CLI brains open their own connections in a subprocess — warming a host in THIS
+    // process fills a pool they never read from.
+    assert(Warmup.hosts(brain: "claudecli", voiceSource: "").isEmpty,
+           "a CLI brain has no host of ours to warm")
+    assert(Warmup.hosts(brain: "claudecli", voiceSource: "elevenlabs")
+           == ["https://api.elevenlabs.io"],
+           "voice is warmed independently of the brain — a CLI brain still speaks")
+    assert(Warmup.hosts(brain: "claude", voiceSource: "elevenlabs").count == 2,
+           "both the brain and the voice get warmed when both are ours")
 }
 
 if CommandLine.arguments.contains("--browser-policy-hook") {
@@ -807,17 +962,20 @@ if let i = CommandLine.arguments.firstIndex(of: "--notchcheck") {
             .tiffRepresentation.flatMap({ NSBitmapImageRep(data: $0) })?.representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1] + ".settings.png"))
         }
+        let idle = AppState()
         let state = AppState()
         state.isListening = true
         state.partial = "why is this build failing"
         state.container = CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.4)
         state.levels = (0..<28).map { CGFloat(abs(sin(Double($0) * 0.8)) * 0.85 + 0.1) }
         let sheet = VStack(spacing: 12) {
-            NotchView().environmentObject(state)
+            NotchView().environmentObject(state).environmentObject(state.drawingController)
             // The pointer at 4x, triangle vs. listening — they must occupy the same box.
+            // Both env objects, or the render traps: DebbyPointerView reads the pointer
+            // as well as the state.
             HStack(spacing: 40) {
-                DebbyPointerView().environmentObject(AppState())
-                DebbyPointerView().environmentObject(state)
+                DebbyPointerView().environmentObject(idle).environmentObject(idle.pointer)
+                DebbyPointerView().environmentObject(state).environmentObject(state.pointer)
             }
             .scaleEffect(4)
             .frame(height: 140)
@@ -830,6 +988,36 @@ if let i = CommandLine.arguments.firstIndex(of: "--notchcheck") {
             .representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
             print("wrote \(CommandLine.arguments[i + 1])")
+        }
+
+        // The rail, every status at once, with one card expanded — the layout question
+        // ("is a pill readable at a glance, does the tail fit") is the kind you have to
+        // look at, and four concurrent agents in four different states is otherwise a
+        // slow thing to stage by hand.
+        let rs = AppState()
+        let mk = { (task: String, session: String, lines: [String], status: AgentRun.Status) -> AgentRun in
+            let run = AgentRun(task: task, session: session)
+            lines.forEach { run.absorb($0 + "\n") }
+            if case .asking(let q) = status { run.absorb("NEED: \(q)\n") } else { run.status = status }
+            return run
+        }
+        rs.agents = [
+            mk("turn the receipts in my Downloads into a spreadsheet of what I spent",
+               "S1", ["Reading Downloads/…", "Found 14 receipts", "uv run --with openpyxl python"], .running),
+            mk("book the 9am slot", "S2", ["Filling the form…"], .asking("about to submit the booking — ok?")),
+            mk("make a deck from my notes", "S3", ["Wrote deck.pptx"], .done),
+            mk("email the team", "S4", ["error: not connected"], .failed(1)),
+        ]
+        rs.railHover = rs.agents[0].id
+        let railSheet = AgentRailView().environmentObject(rs)
+            .frame(width: RailMetrics.expanded + RailMetrics.margin * 2, height: 420)
+            .background(Color(white: 0.30))
+        let rr = ImageRenderer(content: railSheet)
+        rr.scale = 2
+        if let png = rr.nsImage?.tiffRepresentation.flatMap({ NSBitmapImageRep(data: $0) })?
+            .representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1] + ".rail.png"))
+            print("wrote \(CommandLine.arguments[i + 1]).rail.png")
         }
     }
     exit(0)
@@ -927,6 +1115,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = AppState()
     var statusItem: NSStatusItem!
     var notch: NotchWindow!
+    /// Built at launch but not shown: `AppState.showRail()` orders it in when the first
+    /// agent starts, and the last card's removal orders it back out.
+    var rail: AgentRailWindow!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -936,7 +1127,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         notch = NotchWindow(state: state)
         state.notch = notch
+        rail = AgentRailWindow(state: state)
+        state.rail = rail
         state.pointer.start(state: state)
+
+        // The first question carries a screenshot; open the TLS session before it's asked.
+        Warmup.begin(brain: state.backend,
+                     voiceSource: UserDefaults.standard.string(forKey: "voiceSource") ?? "")
 
         Hotkey.watchTalkChord { [weak self] down, held in
             self?.state.talkChord(down: down, heldFor: held)
@@ -951,6 +1148,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // that needs Accessibility. Prompts if missing; the grant needs a relaunch.
         let ax = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
         NSLog("HeyDebby: accessibility=\(ax) — ⌃⌥ hold-to-talk is dead without it")
+        submitLaunchTasks()
+    }
+
+    /// `--agent "task" ["task" …]` submits tasks at launch, exactly as if they had been
+    /// dictated. The rail's real behaviour — several agents at once, click-through, hover,
+    /// Confirm on the right card — otherwise needs a microphone and a lot of talking to
+    /// reach, which is a poor way to check a window. Same intent as `--notchcheck`: the
+    /// screen is the thing under test, so put something real on it.
+    private func submitLaunchTasks() {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--agent") else { return }
+        for task in args[(i + 1)...] where !task.hasPrefix("--") {
+            state.submit("agent: " + task)
+        }
     }
 
     @objc func talk() { state.toggleListening() }
